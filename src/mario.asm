@@ -12,6 +12,7 @@ jmp start_program
 %include "src\const.inc"
 %include "src\data.inc"
 %include "src\video.asm"
+%include "src\map.asm"
 
 ; ------------------------------------------------------------------------------
 ; Main Program Entry Point
@@ -39,121 +40,72 @@ start_program:
     mov [frame_buffer_seg], ax
 
     ; --------------------------------------------------------------------------
-    ; Step 3: Milestone 2 Test Harness - VGA Mode 13h & Drawing Primitives
-    ; Switch to graphics mode 13h and render test scene
+    ; Step 3: Initialize Level Map
+    ; Reset working_map from original_map using REP MOVSB
+    ; --------------------------------------------------------------------------
+    call map_reset
+
+    ; --------------------------------------------------------------------------
+    ; Step 4: Milestone 3 Test Harness - Render Level 1-1 Viewport
+    ; Switch to VGA Mode 13h and render map at Camera X = 0
     ; --------------------------------------------------------------------------
     call vid_set_mode_13h
 
-    ; Set ES to point to Video Memory segment (0A000h) for direct display
+    ; Point ES to Video Memory (0A000h)
     mov ax, 0x0A000
     mov es, ax
 
-    ; 1. Draw Sky Background: FillRect(0, 0, 320, 200, COL_SKY)
-    push word 0             ; x = 0
-    push word 0             ; y = 0
-    push word SCREEN_WIDTH  ; w = 320
-    push word SCREEN_HEIGHT ; h = 200
-    push word COL_SKY       ; color = 9 (Light Blue)
-    call vid_fill_rect
-
-    ; 2. Draw Ground Base: FillRect(0, 160, 320, 40, COL_GROUND)
-    push word 0             ; x = 0
-    push word 160           ; y = 160
-    push word SCREEN_WIDTH  ; w = 320
-    push word 40            ; h = 40
-    push word COL_GROUND    ; color = 6 (Brown)
-    call vid_fill_rect
-
-    ; 3. Draw Grass Trim: FillRect(0, 160, 320, 3, COL_LIGHT_GREEN)
+    ; Draw Screen 1 (camera_x = 0): Start area, ? blocks, Pipe 1, Pit 1
     push word 0
-    push word 160
-    push word SCREEN_WIDTH
-    push word 3
-    push word COL_LIGHT_GREEN ; color = 10 (Light Green)
-    call vid_fill_rect
+    call map_draw
 
-    ; 4. Draw Test Brick Block 1: FillRect(50, 100, 32, 16, COL_BRICK)
-    push word 50
-    push word 100
-    push word 32
-    push word 16
-    push word COL_BRICK     ; color = 4 (Red Brick)
-    call vid_fill_rect
+    ; Wait for key press
+    mov ah, 0x00
+    int 0x16
 
-    ; 5. Draw Test Question Block: FillRect(100, 100, 16, 16, COL_YELLOW)
-    push word 100
-    push word 100
-    push word 16
-    push word 16
-    push word COL_YELLOW    ; color = 14 (Yellow)
-    call vid_fill_rect
+    ; Draw Screen 2 (camera_x = 240): Mid area, Pipe 2, Pit 2, Bricks
+    push word 240
+    call map_draw
 
-    ; 6. Draw Test Brick Block 2: FillRect(134, 100, 32, 16, COL_BRICK)
-    push word 134
-    push word 100
-    push word 32
-    push word 16
-    push word COL_BRICK
-    call vid_fill_rect
+    ; Wait for key press
+    mov ah, 0x00
+    int 0x16
 
-    ; 7. Draw Test Green Pipe Stem: FillRect(210, 120, 32, 40, COL_PIPE)
-    push word 210
-    push word 120
-    push word 32
-    push word 40
-    push word COL_PIPE      ; color = 2 (Green)
-    call vid_fill_rect
+    ; Draw Screen 3 (camera_x = 480): End area, Stairs, Flagpole, Castle
+    push word 480
+    call map_draw
 
-    ; 8. Draw Test Green Pipe Lip: FillRect(206, 114, 40, 8, COL_LIGHT_GREEN)
-    push word 206
-    push word 114
-    push word 40
-    push word 8
-    push word COL_LIGHT_GREEN
-    call vid_fill_rect
+    ; Wait for key press
+    mov ah, 0x00
+    int 0x16
 
-    ; 9. Draw Test Color Palette Swatches across bottom (Colors 0 to 15)
-    mov cx, 16              ; 16 standard VGA colors
-    xor bx, bx              ; bx = color index (0..15)
-.palette_loop:
-    push bx                 ; Save loop register
+    ; Test Dynamic Tile Modification & ResetMap:
+    ; 1. Break brick at (col 14, row 6) by turning it to TILE_SKY (0)
+    push word 14            ; col = 14
+    push word 6             ; row = 6
+    push word TILE_SKY      ; tile = 0
+    call map_set_tile
 
-    ; Compute swatch x = 16 + (bx * 18)
-    mov ax, bx
-    mov dx, 18
-    mul dx
-    add ax, 16              ; ax = x position
+    ; Redraw view 1 with broken brick
+    push word 0
+    call map_draw
 
-    push ax                 ; x
-    push word 176           ; y = 176
-    push word 14            ; w = 14
-    push word 12            ; h = 12
-    push bx                 ; color = bx
-    call vid_fill_rect
+    ; Wait for key press
+    mov ah, 0x00
+    int 0x16
 
-    pop bx
-    inc bx
-    loop .palette_loop
+    ; 2. Call map_reset to restore original_map -> brick reappears!
+    call map_reset
+    push word 0
+    call map_draw
 
-    ; 10. Test PutPixel with single dot accents on the Question block
-    push word 108           ; x = 108
-    push word 108           ; y = 108
-    push word COL_WHITE     ; color = 15 (White)
-    call vid_put_pixel
-
-    push word 107           ; x = 107
-    push word 107           ; y = 107
-    push word COL_WHITE
-    call vid_put_pixel
-
-    ; --------------------------------------------------------------------------
-    ; Wait for keypress before exiting (BIOS INT 16h, AH=00h)
-    ; --------------------------------------------------------------------------
+    ; Wait for final key press before exiting
     mov ah, 0x00
     int 0x16
 
     ; --------------------------------------------------------------------------
-    ; Clean Shutdown: Restore text mode, free memory, and exit to DOS
+    ; Step 5: Clean Shutdown
+    ; Restore text mode, free memory segment, and return to DOS
     ; --------------------------------------------------------------------------
     call vid_restore_text_mode
 

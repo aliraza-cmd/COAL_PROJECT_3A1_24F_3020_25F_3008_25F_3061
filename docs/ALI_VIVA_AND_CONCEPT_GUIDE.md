@@ -249,3 +249,94 @@ During Milestone 2 development, we resolved an authentic 8086 architectural cons
 
 ### Q5: Why is `CLD` required before `REP STOSB`?
 > **Answer**: `CLD` (Clear Direction Flag) sets the Direction Flag (`DF = 0`), which guarantees that string instructions increment the index registers (`DI` / `SI`). If `DF` were 1 (set via `STD`), `STOSB` would decrement `DI`, causing the rectangle to draw backwards and corrupt memory!
+
+
+---
+
+## 7. Milestone 3: 60×12 Level Map, Dual-Map Architecture & Tile Renderer
+
+### The 60×12 Tile Matrix Layout
+- **World Dimensions**: 60 columns × 12 rows = **720 bytes** total.
+- **Pixel World Dimensions**: $60 \times 16 = 960$ pixels wide by $12 \times 16 = 192$ pixels high.
+- The bottom 8 scanlines (from $y=192$ to $199$) remain black.
+- Map rows layout:
+  - **Row 0**: HUD strip (reserved).
+  - **Rows 1 to 8**: Air, clouds, floating blocks, pipes, floating coins, flagpole.
+  - **Row 9**: Surface level (walkway, pipe bases, stair base, castle).
+  - **Rows 10 & 11**: Solid ground tiles, with two distinct 3-tile gaps (**Pit 1** at columns 18–20, **Pit 2** at columns 38–40).
+
+---
+
+### The Dual-Map Architecture (`original_map` vs `working_map`)
+The project manual specifies:
+> *"Keep two copies of the level map: the original (never changed) and a working copy (changed when blocks are hit and coins are taken). Restarting copies the original back with one block-move instruction."*
+
+- **`original_map`**: Defined statically using `db` directives. Contains pristine level data and is **never written to**.
+- **`working_map`**: Runtime buffer in memory. When Super Mario breaks a brick or hits a `?` block, only `working_map` is modified.
+- **`ResetMap` (`map_reset`)**:
+  When Mario dies or a new game starts, restoring the entire level map takes exactly one instruction:
+  ```nasm
+  lea si, [original_map]  ; DS:SI points to master copy
+  lea di, [working_map]   ; ES:DI points to runtime copy
+  mov cx, 720             ; 720 bytes
+  cld                     ; Direction forward
+  rep movsb               ; Block copy in hardware!
+  ```
+  This restores broken bricks and collected coins instantly without looping manually!
+
+---
+
+### World Coordinates to Tile Index Conversion (`GetTile`)
+To detect collisions and interact with blocks, we convert pixel world coordinates $(px, py)$ into tile array indices:
+1. Divide pixel coordinates by 16 ($2^4$) using bit shifts:
+   $$\text{col} = px \gg 4, \quad \text{row} = py \gg 4$$
+2. Compute linear 1D offset in the 60-column map:
+   $$\text{offset} = (\text{row} \times 60) + \text{col}$$
+   To avoid the slow `MUL` instruction:
+   $$\text{row} \times 60 = (\text{row} \times 64) - (\text{row} \times 4) = (\text{row} \ll 6) - (\text{row} \ll 2)$$
+   ```nasm
+   mov dx, bx
+   shl dx, 6       ; dx = row * 64
+   shl bx, 2       ; bx = row * 4
+   sub dx, bx      ; dx = row * 60
+   add dx, ax      ; dx = (row * 60) + col
+   ```
+
+---
+
+### $O(1)$ Jump Table for `map_draw_tile`
+Instead of cascading 13 conditional jumps (`cmp al, 0; je ...; cmp al, 1; je ...`), we use a **Jump Table**:
+```nasm
+    cmp ax, 12
+    jbe .valid_tile
+    jmp .done
+.valid_tile:
+    mov si, ax
+    shl si, 1                   ; Multiply by 2 (word table)
+    jmp [cs:.tile_jump_table + si] ; Direct indirect near jump!
+
+.tile_jump_table:
+    dw .draw_sky        ; 0
+    dw .draw_ground     ; 1
+    dw .draw_brick      ; 2
+    dw .draw_q_blk      ; 3
+    ...
+```
+- **Performance**: Every tile draws in constant $O(1)$ time regardless of whether it is Tile 0 or Tile 12.
+- **Architectural Fix**: Bypasses the 8086 $\pm 127$-byte short jump limit cleanly.
+
+---
+
+## 8. Milestone 3 Viva Questions & Model Answers
+
+### Q1: Why do you store two copies of the level map?
+> **Answer**: During gameplay, Mario breaks bricks and empties question blocks, which permanently alters the map data. By maintaining an immutable `original_map` in ROM/code space and an active `working_map` in RAM, we can respawn or restart the level instantly by copying the original map over the working map using `REP MOVSB`.
+
+### Q2: How does `REP MOVSB` work in `ResetMap`?
+> **Answer**: `REP MOVSB` copies a string of bytes from `DS:SI` to `ES:DI`. Each iteration, it reads `[DS:SI]`, writes to `[ES:DI]`, increments both `SI` and `DI` (because `CLD` cleared the direction flag), and decrements `CX`. It repeats until `CX = 0`. With `CX = 720`, it restores the entire level map in a fraction of a millisecond.
+
+### Q3: How do you map a Mario pixel coordinate $(px, py)$ to a tile in your 2D grid?
+> **Answer**: Since each tile is $16 \times 16$ pixels, we shift $px$ and $py$ right by 4 bits (`shr 4`), which divides by 16. That gives us $\text{col}$ and $\text{row}$. Then we calculate the 1D index using $(\text{row} \times 60) + \text{col}$, which we compute with shifts: $(\text{row} \ll 6) - (\text{row} \ll 2) + \text{col}$.
+
+### Q4: Why did you use a jump table in `DrawTile` instead of sequential `CMP` instructions?
+> **Answer**: First, a chain of 13 comparisons would require up to 13 branch evaluations per tile, which causes performance penalties when rendering 240+ tiles per frame. A jump table executes in $O(1)$ constant time by indexing directly to the handler address. Second, on the 8086, conditional jumps are limited to $\pm 127$ bytes; the jump table uses an indirect near jump `jmp [table + si]`, which eliminates displacement range errors.
