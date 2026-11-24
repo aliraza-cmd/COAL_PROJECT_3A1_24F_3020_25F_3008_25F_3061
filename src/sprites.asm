@@ -16,7 +16,7 @@ SPR_FLAG_BLINK  equ 2           ; Blinking mode (invulnerability)
 ;           [bp+10] = screen_y (signed word: -32 to 220)
 ;           [bp+8]  = sprite_data_offset (near pointer in CS)
 ;           [bp+6]  = sprite_height (16 or 32)
-;           [bp+4]  = flags (bit 0: 0=right, 1=left; bit 1: blink)
+;           [bp+4]  = flags (bit 0: 0=right, 1=left)
 ; Target  : Segment in ES (0A000h or frame_buffer_seg)
 ; Notes   : Color 0 is transparent and never plotted
 ; Preserves all registers, cleans 10 bytes from stack (ret 10)
@@ -32,94 +32,85 @@ draw_sprite:
     push di
 
     mov si, [bp+8]          ; si = sprite bitmap pointer
-    mov dx, [bp+6]          ; dx = height (rows left: 16 or 32)
+    mov dx, [bp+6]          ; dx = height (16 or 32)
     test dx, dx
-    jle .exit
+    jle .done_all
 
-    xor ch, ch              ; ch = current row index (0 to height-1)
+    xor cx, cx              ; cx = row index (0 to height-1)
 
 .row_loop:
-    ; Calculate py = screen_y + current_row
-    mov bx, [bp+10]
-    add bx, cx              ; bx = py (signed)
+    ; Calculate py = screen_y + row
+    mov ax, [bp+10]         ; screen_y
+    add ax, cx              ; ax = py (signed)
 
-    ; Check vertical clipping: 0 <= py < 200
-    cmp bx, 0
-    jl .next_row_skip_pixels
-    cmp bx, SCREEN_HEIGHT
-    jge .next_row_skip_pixels
+    ; Check vertical clip: 0 <= py < 200
+    cmp ax, 0
+    jl .skip_entire_row
+    cmp ax, SCREEN_HEIGHT
+    jge .skip_entire_row
 
-    ; Calculate scanline base offset: (py << 8) + (py << 6)
-    mov ax, bx
+    ; Calculate scanline start in ES: (py << 8) + (py << 6)
+    push cx                 ; Save row counter
+    mov bx, ax
     shl ax, 8
     shl bx, 6
     add ax, bx              ; ax = py * 320
 
-    ; Loop through 16 columns for this row
-    xor cl, cl              ; cl = col index (0 to 15)
+    ; Loop through 16 columns (col 0 to 15)
+    xor cx, cx              ; cx = col counter (0 to 15)
 
 .col_loop:
-    ; Fetch sprite pixel byte: [cs:si]
-    mov al, [cs:si]
+    mov dl, [cs:si]         ; Read sprite pixel byte
     inc si
 
     ; Transparency check: color 0 is never drawn
-    test al, al
-    jz .skip_pixel
+    test dl, dl
+    jz .skip_col_pixel
 
-    ; Calculate screen px based on mirroring flag (bit 0 of [bp+4])
+    ; Calculate px:
+    ; If mirror: px = screen_x + (15 - col)
+    ; If normal: px = screen_x + col
     test word [bp+4], SPR_FLAG_MIRROR
-    jnz .calc_mirrored_x
+    jnz .mirror_px
 
-    ; Normal (Facing Right): px = screen_x + col
-    mov bx, [bp+12]
-    push ax
-    xor ah, ah
-    mov al, cl
-    add bx, ax
-    pop ax
-    jmp .check_x_clip
+    mov bx, [bp+12]         ; screen_x
+    add bx, cx              ; bx = px
+    jmp .clip_px
 
-.calc_mirrored_x:
-    ; Mirrored (Facing Left): px = screen_x + (15 - col)
-    mov bx, [bp+12]
-    push ax
-    mov al, 15
-    sub al, cl
-    xor ah, ah
-    add bx, ax
-    pop ax
+.mirror_px:
+    mov bx, 15
+    sub bx, cx
+    add bx, [bp+12]         ; bx = px
 
-.check_x_clip:
-    ; Horizontal clipping: 0 <= px < 320
+.clip_px:
+    ; Horizontal clip: 0 <= px < 320
     cmp bx, 0
-    jl .skip_pixel
+    jl .skip_col_pixel
     cmp bx, SCREEN_WIDTH
-    jge .skip_pixel
+    jge .skip_col_pixel
 
-    ; Plot pixel: di = scanline_base + px
+    ; Write pixel: ES:[scanline_base + px] = dl
     mov di, ax
     add di, bx
-    mov [es:di], al
+    mov [es:di], dl
 
-.skip_pixel:
-    inc cl
-    cmp cl, 16
+.skip_col_pixel:
+    inc cx
+    cmp cx, 16
     jb .col_loop
 
-    jmp .row_finished
+    pop cx                  ; Restore row counter
+    jmp .advance_row
 
-.next_row_skip_pixels:
-    ; Row is off-screen vertically: advance SI by 16 bytes
-    add si, 16
+.skip_entire_row:
+    add si, 16              ; Skip this row in bitmap
 
-.row_finished:
-    inc ch
-    mov ax, [bp+6]          ; height
-    cmp ch, al
+.advance_row:
+    inc cx
+    cmp cx, [bp+6]          ; Compare against height
     jb .row_loop
 
-.exit:
+.done_all:
     pop di
     pop si
     pop dx
@@ -131,8 +122,8 @@ draw_sprite:
 
 ; ==============================================================================
 ; Sprite Bitmaps (Color 0 = Transparent)
-; Colors: 0=Trans, 1=Blue, 2=Green, 4=Red, 6=Brown, 7=LtGray, 8=DkGray,
-;         9=LtBlue, 10=LtGreen, 14=Yellow, 15=White
+; Palette: 0=Trans, 1=Blue, 2=Green, 4=Red, 6=Brown, 7=LtGray, 8=DkGray,
+;          9=LtBlue, 10=LtGreen, 14=Yellow, 15=White
 ; ==============================================================================
 
 ; --- Small Mario (16x16) Standing ---
@@ -299,8 +290,8 @@ spr_mushroom:
     db 0,4,4,15,4,4,4,4,4,4,4,4,15,4,4,0
     db 0,0,0,0,14,14,8,14,14,8,14,14,0,0,0,0
     db 0,0,0,14,14,14,8,14,14,8,14,14,14,0,0,0
-    db 0,0,0,14,14,14,14,14,14,14,14,14,14,0,0,0
-    db 0,0,0,14,14,14,14,14,14,14,14,14,14,0,0,0
+    db 0,0,0,14,14,14,14,14,14,14,14,14,0,0,0
+    db 0,0,0,14,14,14,14,14,14,14,14,14,0,0,0
     db 0,0,0,0,14,14,14,14,14,14,14,14,0,0,0,0
     db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 

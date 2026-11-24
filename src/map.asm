@@ -138,6 +138,7 @@ map_draw_tile:
     push cx
     push dx
     push si
+    push di
 
     mov bx, [bp+8]      ; bx = x
     mov dx, [bp+6]      ; dx = y
@@ -431,6 +432,7 @@ map_draw_tile:
     jmp .done
 
 .done:
+    pop di
     pop si
     pop dx
     pop cx
