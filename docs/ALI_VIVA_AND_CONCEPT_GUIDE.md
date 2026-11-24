@@ -137,3 +137,115 @@ int 0x21
 - **Milestone 3**: 60×12 level map, tile codes, `GetTile(px, py)`, `DrawTile`, `DrawMap`, and `ResetMap` using `REP MOVSB`.
 - **Milestone 4**: 16×16 & 16×32 sprite bit blitting with transparency (color 0), horizontal mirroring, and 4-edge clipping.
 - **Milestone 5**: Full double-buffering pipeline with `REP STOSW` backbuffer clear and `REP MOVSW` screen blit.
+
+
+---
+
+## 5. Milestone 2: VGA Mode 13h & Drawing Primitives
+
+### What is VGA Mode 13h?
+- Standard graphics mode provided by VGA BIOS (`INT 10h, AX=0013h`).
+- **Resolution**: 320 pixels horizontal × 200 pixels vertical.
+- **Colors**: 256 colors per pixel (8 bits / 1 byte per pixel).
+- **Video Memory Segment**: `0A000h:0000` to `0A000h:FA00` (exactly 64,000 bytes).
+- **Linear Framebuffer**: Unlike older planar modes, Mode 13h is completely linear! 
+  Pixel $(0, 0)$ is at byte offset `0`, pixel $(1, 0)$ is at byte `1`, and pixel $(0, 1)$ is at byte `320`.
+
+### Fast Offset Calculation: Why Shifts Instead of `MUL`?
+In Module 2, the manual states:
+> *"Compute the offset as $y \times 320 + x$ using shifts ($y \times 256 + y \times 64)$."*
+
+#### Mathematical Proof:
+$$320 = 256 + 64 = 2^8 + 2^6$$
+$$y \times 320 = (y \times 2^8) + (y \times 2^6) = (y \ll 8) + (y \ll 6)$$
+
+#### Assembly Implementation:
+```nasm
+mov ax, y           ; ax = y
+mov bx, ax          ; bx = y
+shl ax, 8           ; ax = y * 256
+shl bx, 6           ; bx = y * 64
+add ax, bx          ; ax = y * 320
+add ax, x           ; ax = (y * 320) + x
+mov di, ax          ; di = offset in ES
+```
+
+#### Why is this crucial for the Viva?
+On the original 8086 processor:
+- `MUL cx` takes **118 to 133 clock cycles**!
+- Two `SHL` instructions plus `ADD` take only **~16 to 24 clock cycles**!
+- That is **over 5 times faster**! In a 30 FPS game rendering thousands of pixels per frame, using shifts is essential to prevent lag.
+
+---
+
+### Stack Parameters & Standard Calling Convention
+The project manual strictly requires:
+> *"Every procedure must preserve every register it does not return. Procedures that need inputs take them through the stack."*
+
+#### How `PutPixel(x, y, color)` Stack Frame Works:
+When caller executes:
+```nasm
+push word x         ; [bp + 8]
+push word y         ; [bp + 6]
+push word color     ; [bp + 4]
+call vid_put_pixel  ; Pushes return IP (2 bytes) -> [bp + 2]
+```
+
+Inside the subroutine:
+```nasm
+push bp             ; Save old frame pointer -> [bp + 0]
+mov bp, sp          ; Establish new stack frame
+push ax             ; Preserve registers
+push bx
+push di
+; ... access arguments via [bp + 4], [bp + 6], [bp + 8] ...
+pop di              ; Restore registers in reverse order
+pop bx
+pop ax
+pop bp              ; Restore caller's BP
+ret 6               ; Returns and cleans 6 bytes (3 words) from stack!
+```
+
+---
+
+### String Instruction `REP STOSB` for `FillRect`
+- In `vid_fill_rect`, rather than writing a slow pixel-by-pixel loop, we use the 8086 string primitive:
+  ```nasm
+  cld             ; Clear Direction Flag (DF = 0 -> auto-increment DI)
+  mov cx, width   ; Number of bytes in this row
+  rep stosb       ; Store AL into ES:[DI], increment DI, repeat CX times!
+  ```
+- Hardware executes `rep stosb` at maximum bus bandwidth, filling rectangles in microseconds!
+
+---
+
+### The 8086 "Short Jump Out of Range" Rule
+During Milestone 2 development, we resolved an authentic 8086 architectural constraint:
+- On 8086, conditional jumps (`JC`, `JZ`, `JNZ`, `JNE`) use an **8-bit signed relative displacement** (range: **-128 to +127 bytes**).
+- When code grows beyond 127 bytes, direct `jc label` fails with `error: short jump is out of range`.
+- **The Fix (Trampoline Pattern)**:
+  Invert the condition and use an unconditional near jump `JMP` (which supports 16-bit displacement up to 32 KB):
+  ```nasm
+  jnc .mem_ok       ; Jump forward over the JMP if NO error
+  jmp memory_failed ; Near 16-bit jump can reach anywhere in 64 KB!
+  .mem_ok:
+  ```
+
+---
+
+## 6. Milestone 2 Viva Questions & Model Answers
+
+### Q1: What video mode does your game use, and what is its memory structure?
+> **Answer**: We use VGA Mode 13h (activated via BIOS `INT 10h, AX=0013h`). Its resolution is $320 \times 200$ pixels with 256 colors (1 byte per pixel). Video RAM is mapped as a flat linear segment at physical address `0A000h:0000` through `0A000h:0FA00` (64,000 bytes).
+
+### Q2: How do you calculate the memory offset of a pixel at coordinate $(x, y)$?
+> **Answer**: The linear offset formula is $\text{offset} = (y \times 320) + x$. We compute this without the slow `MUL` instruction by decomposing 320 into $256 + 64$. We shift $y$ left by 8 bits ($y \times 256$) and left by 6 bits ($y \times 64$), add the two results, and add $x$.
+
+### Q3: Why do your procedures end with `ret N` instead of plain `ret`?
+> **Answer**: We follow the standard convention where the callee cleans its own parameters off the stack. For example, `PutPixel` receives 3 word parameters (6 bytes). `ret 6` pops the instruction pointer to return to the caller and simultaneously adds 6 to `SP`, discarding the arguments in one instruction without needing the caller to do `add sp, 6`.
+
+### Q4: Why did you use `REP STOSB` in `FillRect`?
+> **Answer**: `REP STOSB` is a specialized string manipulation instruction. It writes the byte in `AL` into `ES:[DI]` and increments `DI` automatically, repeating `CX` times until `CX` reaches zero. It executes directly in microcode without loop instruction overhead, making rectangle filling dramatically faster than individual memory writes.
+
+### Q5: Why is `CLD` required before `REP STOSB`?
+> **Answer**: `CLD` (Clear Direction Flag) sets the Direction Flag (`DF = 0`), which guarantees that string instructions increment the index registers (`DI` / `SI`). If `DF` were 1 (set via `STD`), `STOSB` would decrement `DI`, causing the rectangle to draw backwards and corrupt memory!

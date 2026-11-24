@@ -1,0 +1,21 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build & Run in DOSBox",
+      "type": "shell",
+      "command": "${workspaceFolder}\\build.bat",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run MARIO.COM in DOSBox",
+      "type": "shell",
+      "command": "${workspaceFolder}\\run.bat",
+      "problemMatcher": []
+    }
+  ]
+}
