@@ -133,3 +133,95 @@ vid_fill_rect:
     pop ax
     pop bp
     ret 10
+
+
+; ------------------------------------------------------------------------------
+; vid_clear_buffer
+; Purpose : Fill the off-screen backbuffer with a color word using REP STOSW
+; Stack   : [bp+4] = color index (word: low byte is used, duplicated into high byte)
+; Target  : Segment in frame_buffer_seg
+; Concepts: String word operations, 32,000 word writes (64,000 bytes)
+; Preserves all registers, cleans 2 bytes (ret 2)
+; ------------------------------------------------------------------------------
+vid_clear_buffer:
+    push bp
+    mov bp, sp
+    push ax
+    push cx
+    push di
+    push es
+
+    mov es, [cs:frame_buffer_seg]
+    xor di, di
+
+    mov al, [bp+4]
+    mov ah, al          ; Duplicate color byte into AX word (e.g. 0909h)
+    mov cx, 32000       ; 32,000 words = 64,000 bytes
+    cld
+    rep stosw           ; Fast hardware word fill!
+
+    pop es
+    pop di
+    pop cx
+    pop ax
+    pop bp
+    ret 2
+
+; ------------------------------------------------------------------------------
+; vid_blit_buffer
+; Purpose : Copy entire 64,000-byte backbuffer to VGA Video Memory (0A000h:0000)
+; Concepts: High-speed double-buffering blit using REP MOVSW
+; Preserves all registers
+; ------------------------------------------------------------------------------
+vid_blit_buffer:
+    push ds
+    push es
+    push si
+    push di
+    push cx
+    push ax
+
+    ; ES:DI = 0A000h:0000 (Video RAM)
+    mov ax, 0x0A000
+    mov es, ax
+    xor di, di
+
+    ; DS:SI = frame_buffer_seg:0000 (Backbuffer)
+    mov ds, [cs:frame_buffer_seg]
+    xor si, si
+
+    mov cx, 32000       ; 32,000 words = 64,000 bytes
+    cld
+    rep movsw           ; Blit entire frame in one hardware pass!
+
+    pop ax
+    pop cx
+    pop di
+    pop si
+    pop es
+    pop ds
+    ret
+
+; ------------------------------------------------------------------------------
+; vid_wait_vsync
+; Purpose : Wait for VGA vertical retrace interval (port 03DAh, bit 3)
+; Ensures the screen blit occurs during blanking for zero visual tearing
+; Preserves all registers
+; ------------------------------------------------------------------------------
+vid_wait_vsync:
+    push ax
+    push dx
+
+    mov dx, 0x03DA
+.wait_end:
+    in al, dx
+    test al, 8
+    jnz .wait_end
+.wait_start:
+    in al, dx
+    test al, 8
+    jz .wait_start
+
+    pop dx
+    pop ax
+    ret

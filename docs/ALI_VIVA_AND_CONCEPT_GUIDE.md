@@ -340,3 +340,159 @@ Instead of cascading 13 conditional jumps (`cmp al, 0; je ...; cmp al, 1; je ...
 
 ### Q4: Why did you use a jump table in `DrawTile` instead of sequential `CMP` instructions?
 > **Answer**: First, a chain of 13 comparisons would require up to 13 branch evaluations per tile, which causes performance penalties when rendering 240+ tiles per frame. A jump table executes in $O(1)$ constant time by indexing directly to the handler address. Second, on the 8086, conditional jumps are limited to $\pm 127$ bytes; the jump table uses an indirect near jump `jmp [table + si]`, which eliminates displacement range errors.
+
+
+---
+
+## 9. Milestone 4: Sprite Engine, Mirroring & 4-Edge Clipping
+
+### 16×16 and 16×32 Bitmapped Graphics
+- Each sprite is an array of raw pixel bytes stored in code/data space:
+  - Small Mario, Goomba, Koopa, Shell, Mushroom, Coin: $16 \times 16 = \mathbf{256\text{ bytes}}$ each.
+  - Super Mario: $16 \times 32 = \mathbf{512\text{ bytes}}$.
+- **Color 0 Transparency**:
+  When reading a pixel from the sprite bitmap (`mov al, [cs:si]`):
+  ```nasm
+  test al, al
+  jz .skip_pixel      ; If pixel value is 0, do NOT draw it!
+  ```
+  This allows the sky or brick background behind Mario to show through cleanly!
+
+---
+
+### Horizontal Mirroring (Facing Left vs. Facing Right)
+Instead of storing duplicate mirrored bitmaps for left and right (which wastes valuable ROM/RAM), we mirror sprites **in software on the fly** using arithmetic:
+- **Facing Right (Normal)**:
+  Screen coordinate = $\text{screen\_x} + \text{col}$ (where $\text{col}$ goes from $0$ to $15$).
+- **Facing Left (Mirrored)**:
+  Screen coordinate = $\text{screen\_x} + (15 - \text{col})$.
+- **Implementation**:
+  ```nasm
+  test word [bp+4], SPR_FLAG_MIRROR
+  jnz .calc_mirrored_x
+  ; Normal:
+  add bx, col
+  jmp .check_x_clip
+  .calc_mirrored_x:
+  mov al, 15
+  sub al, col
+  add bx, ax
+  ```
+
+---
+
+### 4-Edge Screen Clipping (Preventing Buffer Overruns)
+When Mario or a Goomba walks into or out of the screen, parts of the sprite may be off-screen. If coordinates are not clipped:
+- Negative coordinates wrap around to `65,535` and corrupt video memory.
+- Coordinates $> 320$ wrap onto the next scanline, breaking the visual layout.
+
+#### Our Robust Clipping Logic:
+1. **Vertical Bounds Check ($Y$-axis)**:
+   For every row $py = \text{screen\_y} + \text{row}$:
+   ```nasm
+   cmp py, 0
+   jl .next_row_skip
+   cmp py, 200
+   jge .next_row_skip
+   ```
+   If the row is above or below the screen, we skip plotting all 16 pixels of that row and advance `SI += 16`!
+2. **Horizontal Bounds Check ($X$-axis)**:
+   For every pixel $px$:
+   ```nasm
+   cmp px, 0
+   jl .skip_pixel
+   cmp px, 320
+   jge .skip_pixel
+   ```
+   If an individual pixel falls outside the 320-pixel scanline, it is discarded safely.
+
+---
+
+## 10. Milestone 5: Double Buffering Engine (Zero Screen Flicker)
+
+### Why Does Direct Screen Drawing Flicker?
+- In VGA hardware, the CRT monitor (or emulator) refreshes the screen from top to bottom 60 to 70 times per second.
+- If the CPU clears a character and draws a new one directly in Video RAM (`0A000h`), the monitor may scan that area **while it is blanked or half-drawn**.
+- The human eye perceives this as severe flickering, tearing, and black strobing.
+
+---
+
+### The Off-Screen Double-Buffering Architecture
+Instead of drawing to Video Memory, **everything in a frame is drawn into our dedicated 64,000-byte RAM buffer** (`[frame_buffer_seg]:0000`).
+Once the entire frame (sky, tiles, bricks, Mario, enemies) is 100% complete, we copy the entire buffer to Video RAM in **one atomic block move**!
+
+```
+[Clear Backbuffer (REP STOSW)]
+            │
+            ▼
+[Draw Map Tiles to Backbuffer]
+            │
+            ▼
+[Draw Sprites to Backbuffer]
+            │
+            ▼
+[Wait for VSync (Port 03DAh)]
+            │
+            ▼
+[Blit Backbuffer to 0A000h (REP MOVSW)]  ===>  Smooth 30 FPS Display!
+```
+
+---
+
+### High-Speed String Operations: `REP STOSW` & `REP MOVSW`
+
+#### 1. Instant Clearing with `REP STOSW`
+- Writing 64,000 bytes one-by-one takes 64,000 instructions.
+- By packing two sky color bytes into a 16-bit word (e.g. `0909h` for Light Blue), we write **words** instead of bytes:
+  ```nasm
+  mov al, COL_SKY
+  mov ah, al          ; AX = 0909h
+  mov cx, 32000       ; 32,000 words = 64,000 bytes
+  cld
+  rep stosw           ; Clears entire 64KB buffer in hardware!
+  ```
+
+#### 2. Instant Blitting with `REP MOVSW`
+- To copy from backbuffer (`DS:SI`) to VGA Video RAM (`ES:DI = 0A000h:0000`):
+  ```nasm
+  push ds
+  mov ax, 0x0A000
+  mov es, ax
+  xor di, di
+  mov ds, [cs:frame_buffer_seg]
+  xor si, si
+  mov cx, 32000       ; 32,000 words = 64,000 bytes
+  cld
+  rep movsw           ; Hardware block blit!
+  pop ds
+  ```
+- This executes in a fraction of a millisecond, completely eliminating all flicker!
+
+#### 3. Vertical Retrace Synchronization (`vid_wait_vsync`)
+- VGA Status Register 1 is at I/O port `03DAh`.
+- Bit 3 is set to `1` when the electron beam has finished scanning and is returning to the top (Vertical Blanking Interval).
+- Waiting for this bit before calling `REP MOVSW` ensures the blit occurs while the beam is off:
+  ```nasm
+  mov dx, 0x03DA
+  .wait_end:   in al, dx; test al, 8; jnz .wait_end
+  .wait_start: in al, dx; test al, 8; jz  .wait_start
+  ```
+
+---
+
+## 11. Milestones 4 & 5 Viva Questions & Model Answers
+
+### Q1: How do you implement sprite transparency without an alpha channel?
+> **Answer**: In 8-bit palette graphics, we designate palette index `0` as the "transparent color". In our `draw_sprite` procedure, when reading each pixel byte from the sprite data, we perform `test al, al`. If the result is zero (`JZ`), we increment the position but skip writing to video memory. This allows underlying background pixels to remain unchanged.
+
+### Q2: How did you implement horizontal sprite mirroring (facing left) without extra bitmap files?
+> **Answer**: When the mirroring flag is set, instead of calculating pixel screen $X$ as $\text{screen\_x} + \text{col}$, we invert the column index by calculating $\text{screen\_x} + (15 - \text{col})$. This flips the sprite horizontally in real time, saving substantial memory and eliminating redundant sprite tables.
+
+### Q3: What is screen clipping, and what happens if you don't implement it?
+> **Answer**: Clipping ensures that only the portions of a sprite located inside the visible screen ($0 \le x < 320$ and $0 \le y < 200$) are written to memory. If a sprite is drawn at a negative coordinate (e.g., $x = -5$) without clipping, 16-bit unsigned subtraction wraps to a large number (e.g. `65531`), causing the CPU to write past buffer boundaries, corrupting code, data, or crashing DOSBox!
+
+### Q4: Why is `REP STOSW` twice as fast as `REP STOSB`?
+> **Answer**: The x86 processor features a 16-bit internal data bus. `STOSB` writes 8 bits (1 byte) per bus cycle, requiring 64,000 memory cycles to clear the screen. `STOSW` transfers 16 bits (2 bytes) simultaneously, requiring only 32,000 memory cycles. This halves the bus traffic and doubles backbuffer clearing speed.
+
+### Q5: What is the purpose of reading I/O port `03DAh` before copying the buffer?
+> **Answer**: Port `03DAh` is the VGA Input Status Register 1. Bit 3 indicates the Vertical Retrace Interval (when the display beam is inactive and repositioning to the top). By synchronizing our `REP MOVSW` screen transfer with this interval, we ensure that memory updates never collide with active rasterization, completely eliminating horizontal screen tearing.
