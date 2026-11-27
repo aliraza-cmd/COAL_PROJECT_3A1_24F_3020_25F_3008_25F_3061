@@ -1906,3 +1906,360 @@ UpdateMario:
         mov     byte [Pose],0
 .done:  popa
         ret
+
+; =============================================================================
+;  MODULE 12 : BLOCKS, COINS AND POWER-UPS (Section 5.9)
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; TriggerBlock(col, row)
+; Purpose : Mario's head hit this tile from below: brick (breaks for Super
+;           Mario), "?" with coin, "?" with mushroom.  Works on the WORKING map.
+; Changes : none
+; -----------------------------------------------------------------------------
+TriggerBlock:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     bx,[bp+4]
+        cmp     bx,MAP_ROWS             ; FIX: row / column must be inside the map
+        jae     near .out
+        cmp     word [bp+6],MAP_COLS
+        jae     near .out
+        imul    bx,bx,MAP_COLS
+        add     bx,[bp+6]
+        mov     al,[WorkMap+bx]
+        cmp     al,T_BRICK
+        je      .brick
+        cmp     al,T_QCOIN
+        je      .qcoin
+        cmp     al,T_QMUSH
+        je      .qmush
+        jmp     .out
+.brick: cmp     byte [Form],0
+        je      near .out                    ; Small Mario: the brick stays
+        push    word [bp+6]
+        push    word [bp+4]
+        push    word T_SKY
+        call    SetTile
+        push    word 50
+        call    AddScore
+        mov     ax,[bp+6]
+        shl     ax,4
+        mov     cx,[bp+4]
+        shl     cx,4
+        push    word 1
+        push    ax
+        push    cx
+        push    word 50
+        call    SpawnEffect
+        jmp     .out
+.qcoin: push    word [bp+6]
+        push    word [bp+4]
+        push    word T_EMPTY
+        call    SetTile
+        call    AddCoin
+        push    word 200
+        call    AddScore
+        mov     ax,[bp+6]
+        shl     ax,4
+        mov     cx,[bp+4]
+        shl     cx,4
+        sub     cx,16
+        push    word 2                  ; the coin hops out
+        push    ax
+        push    cx
+        push    word 0
+        call    SpawnEffect
+        sub     cx,12
+        push    word 1                  ; and shows +200
+        push    ax
+        push    cx
+        push    word 200
+        call    SpawnEffect
+        jmp     .out
+.qmush: push    word [bp+6]
+        push    word [bp+4]
+        push    word T_EMPTY
+        call    SetTile
+        push    word [bp+6]
+        push    word [bp+4]
+        call    SpawnMushroom
+.out:   popa
+        pop     bp
+        ret     4
+
+; -----------------------------------------------------------------------------
+; SpawnMushroom(col, row)
+; Purpose : puts a mushroom on top of the block at (col,row) into a free slot
+;           of the entity table; it starts moving right at 1 px/frame.
+; Changes : none
+; -----------------------------------------------------------------------------
+SpawnMushroom:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,EntTbl
+        mov     cx,ENT_MAX
+.f:     cmp     byte [si+E_TYPE],ET_NONE
+        je      .got
+        add     si,ENT_SIZE
+        loop    .f
+        jmp     .out
+.got:   mov     byte [si+E_TYPE],ET_MUSH
+        mov     byte [si+E_STATE],ES_WALK
+        mov     ax,[bp+6]
+        shl     ax,4
+        mov     [si+E_X],ax
+        mov     byte [si+E_XF],0
+        mov     byte [si+E_GRACE],0
+        mov     ax,[bp+4]
+        dec     ax
+        shl     ax,4
+        shl     ax,8
+        mov     [si+E_Y],ax
+        mov     word [si+E_VX],MUSH_V
+        mov     word [si+E_VY],0
+        mov     word [si+E_TIMER],0
+        mov     word [si+E_AUX],0
+.out:   popa
+        pop     bp
+        ret     4
+
+; =============================================================================
+;  MODULE 11 : ENEMIES, SHELLS AND MUSHROOMS (Section 5.5)
+;  Entities live in a table of fixed-size records (see E_xxx offsets) and are
+;  reached with indexed addressing: [si+E_X], [si+E_VX] ...
+; =============================================================================
+
+; EntMoveX(rec) : adds the horizontal speed (8.8) to the record's x position.
+EntMoveX:
+        push    bp
+        mov     bp,sp
+        push    ax
+        push    dx
+        push    si
+        mov     si,[bp+4]
+        xor     ax,ax
+        mov     al,[si+E_XF]
+        add     ax,[si+E_VX]
+        mov     dx,ax
+        sar     dx,8
+        mov     [si+E_XF],al            ; fraction = low byte
+        add     [si+E_X],dx
+        pop     si
+        pop     dx
+        pop     ax
+        pop     bp
+        ret     2
+
+; EntWallHit(rec) : AX = 1 when a solid tile is in front of the entity.
+EntWallHit:
+        push    bp
+        mov     bp,sp
+        push    bx
+        push    si
+        mov     si,[bp+4]
+        mov     bx,[si+E_X]
+        cmp     word [si+E_VX],0
+        jl      .l
+        add     bx,13
+        jmp     .t
+.l:     add     bx,2
+.t:     mov     ax,[si+E_Y]
+        shr     ax,8
+        add     ax,8                    ; middle of the sprite
+        push    bx
+        push    ax
+        call    IsSolid
+        pop     si
+        pop     bx
+        pop     bp
+        ret     2
+
+; EntOnGround(rec) : AX = 1 when the entity stands on a solid tile.
+EntOnGround:
+        push    bp
+        mov     bp,sp
+        push    bx
+        push    si
+        mov     si,[bp+4]
+        mov     bx,[si+E_Y]
+        shr     bx,8
+        add     bx,16
+        mov     ax,[si+E_X]
+        add     ax,2
+        push    ax
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jnz     .out
+        mov     ax,[si+E_X]
+        add     ax,13
+        push    ax
+        push    bx
+        call    IsSolid
+.out:   pop     si
+        pop     bx
+        pop     bp
+        ret     2
+
+; EntGroundAhead(rec) : AX = 1 when there is floor under the front part of a
+;                       walking entity (used by the Koopa to turn at ledges).
+EntGroundAhead:
+        push    bp
+        mov     bp,sp
+        push    bx
+        push    si
+        mov     si,[bp+4]
+        mov     ax,[si+E_X]
+        cmp     word [si+E_VX],0
+        jl      .l
+        add     ax,12
+        jmp     .t
+.l:     add     ax,4
+.t:     mov     bx,[si+E_Y]
+        shr     bx,8
+        add     bx,16
+        push    ax
+        push    bx
+        call    IsSolid
+        pop     si
+        pop     bx
+        pop     bp
+        ret     2
+
+; EntFall(rec) : gravity, vertical move and landing on solid tiles.
+EntFall:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,[bp+4]
+        mov     ax,[si+E_VY]
+        add     ax,GRAVITY
+        cmp     ax,FALL_MAX
+        jle     .g
+        mov     ax,FALL_MAX
+.g:     mov     [si+E_VY],ax
+        add     [si+E_Y],ax
+        mov     bx,[si+E_Y]
+        shr     bx,8
+        add     bx,15                   ; lowest pixel row of the sprite
+        mov     ax,[si+E_X]
+        add     ax,2
+        push    ax
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jnz     .land
+        mov     ax,[si+E_X]
+        add     ax,13
+        push    ax
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jz      .out
+.land:  shr     bx,4
+        shl     bx,4
+        sub     bx,16                   ; stand on top of the tile
+        shl     bx,8
+        mov     [si+E_Y],bx
+        mov     word [si+E_VY],0
+.out:   popa
+        pop     bp
+        ret     2
+
+; EntHitsOther(rec) : AX = 1 when this entity touches another walking enemy or
+;                     shell (so it can turn around).
+EntHitsOther:
+        push    bp
+        mov     bp,sp
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        mov     si,[bp+4]
+        mov     di,EntTbl
+        mov     cx,ENT_MAX
+.l:     cmp     di,si
+        je      .n
+        mov     al,[di+E_TYPE]
+        cmp     al,ET_GOOMBA
+        jb      .n
+        cmp     al,ET_SHELL
+        ja      .n
+        cmp     byte [di+E_STATE],ES_WALK
+        jb      .n
+        cmp     byte [di+E_STATE],ES_FLAT
+        je      .n
+        mov     ax,[si+E_X]
+        sub     ax,[di+E_X]
+        jns     .a1
+        neg     ax
+.a1:    cmp     ax,12
+        jge     .n
+        mov     ax,[si+E_Y]
+        sub     ax,[di+E_Y]
+        sar     ax,8
+        jns     .a2
+        neg     ax
+.a2:    cmp     ax,12
+        jge     .n
+        mov     ax,1
+        jmp     .out
+.n:     add     di,ENT_SIZE
+        loop    .l
+        xor     ax,ax
+.out:   pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     bp
+        ret     2
+
+; ShellKills(rec) : a sliding shell removes every Goomba / Koopa it touches
+;                   (+500 each, Section 5.4).
+ShellKills:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,[bp+4]
+        mov     di,EntTbl
+        mov     cx,ENT_MAX
+.l:     mov     al,[di+E_TYPE]
+        cmp     al,ET_GOOMBA
+        je      .chk
+        cmp     al,ET_KOOPA
+        jne     .n
+.chk:   cmp     byte [di+E_STATE],ES_WALK
+        jne     .n
+        mov     ax,[si+E_X]
+        sub     ax,[di+E_X]
+        jns     .a1
+        neg     ax
+.a1:    cmp     ax,14
+        jge     .n
+        mov     ax,[si+E_Y]
+        sub     ax,[di+E_Y]
+        sar     ax,8
+        jns     .a2
+        neg     ax
+.a2:    cmp     ax,12
+        jge     .n
+        mov     byte [di+E_TYPE],ET_NONE
+        push    word 500
+        call    AddScore
+        push    word 1
+        push    word [di+E_X]
+        mov     ax,[di+E_Y]
+        shr     ax,8
+        push    ax
+        push    word 500
+        call    SpawnEffect
+.n:     add     di,ENT_SIZE
+        loop    .l
+        popa
+        pop     bp
+        ret     2
