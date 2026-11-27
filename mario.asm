@@ -3839,3 +3839,254 @@ HandleGameOver:
         call    FlipFrame
 .out:   popa
         ret
+; =============================================================================
+;  MODULE 7 + 8 : KEYBOARD AND TIMER INTERRUPTS
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; KbdISR  (INT 09h)
+; Purpose : reads the scan code from port 60h, ignores the E0h prefix (and the
+;           fake shift that follows it on NumLock keyboards), keeps the 128-byte
+;           key-state table (1 = held), queues make codes and arms the jump
+;           buffer; sends EOI and returns with IRET.
+; -----------------------------------------------------------------------------
+KbdISR:
+        push    ax
+        push    bx
+        push    ds
+        mov     ax,cs
+        mov     ds,ax
+        in      al,60h
+        cmp     al,0E0h
+        jne     .code
+        mov     byte [ExtFlag],1        ; extended prefix: ignore it
+        jmp     .eoi
+.code:  mov     ah,[ExtFlag]
+        mov     byte [ExtFlag],0
+        mov     bl,al
+        and     bl,7Fh
+        test    ah,ah
+        jz      .go
+        cmp     bl,2Ah                  ; fake shift after E0 (NumLock) is ignored
+        je      .eoi
+        cmp     bl,36h
+        je      .eoi
+.go:    mov     [LastScan],bl           ; scan code without the release bit
+        xor     bh,bh
+        test    al,80h
+        jnz     .release
+        cmp     byte [KeyTbl+bx],0
+        jne     .eoi                    ; auto-repeat: nothing new
+        mov     byte [KeyTbl+bx],1
+        cmp     bl,SC_SPACE
+        jne     .q
+        mov     byte [JumpBuf],6        ; jump request lives for 6 frames
+.q:     mov     al,[KeyTail]            ; put the key into the ring queue
+        mov     ah,al
+        inc     ah
+        and     ah,15
+        cmp     ah,[KeyHead]
+        je      .eoi                    ; queue full
+        push    bx
+        xor     bh,bh
+        mov     bl,al
+        mov     al,[LastScan]
+        mov     [KeyQueue+bx],al
+        pop     bx
+        mov     [KeyTail],ah
+        jmp     .eoi
+.release:
+        mov     byte [KeyTbl+bx],0
+.eoi:   mov     al,20h                  ; end of interrupt
+        out     20h,al
+        pop     ds
+        pop     bx
+        pop     ax
+        iret
+
+; -----------------------------------------------------------------------------
+; TimerISR  (INT 08h, programmed to 30 Hz)
+; Purpose : counts ticks for the game loop and chains to the original BIOS
+;           handler about 18.2 times per second so DOS time keeps running.
+; -----------------------------------------------------------------------------
+TimerISR:
+        push    ax
+        push    ds
+        mov     ax,cs
+        mov     ds,ax
+        inc     word [TickCount]
+        add     word [ChainAcc],91
+        cmp     word [ChainAcc],150
+        jb      .eoi
+        sub     word [ChainAcc],150
+        pop     ds
+        pop     ax
+        jmp     far [cs:OldInt08]       ; the BIOS handler sends the EOI and IRETs
+.eoi:   mov     al,20h
+        out     20h,al
+        pop     ds
+        pop     ax
+        iret
+
+; InstallHandlers : saves the old vectors (INT 21h AH=35h), installs ours
+;                   (AH=25h) and reprograms the timer to 30 Hz.
+InstallHandlers:
+        pusha
+        push    es
+        mov     ax,3509h
+        int     21h
+        mov     [OldInt09],bx
+        mov     [OldInt09+2],es
+        mov     ax,3508h
+        int     21h
+        mov     [OldInt08],bx
+        mov     [OldInt08+2],es
+        cli
+        mov     dx,KbdISR
+        mov     ax,2509h
+        int     21h
+        mov     dx,TimerISR
+        mov     ax,2508h
+        int     21h
+        mov     al,36h                  ; PIT channel 0, mode 3
+        out     43h,al
+        mov     ax,PIT_DIV
+        out     40h,al
+        mov     al,ah
+        out     40h,al
+        sti
+        pop     es
+        popa
+        ret
+
+; RestoreHandlers : puts back both vectors and the normal 18.2 Hz timer rate.
+RestoreHandlers:
+        pusha
+        push    ds
+        cli
+        lds     dx,[OldInt09]
+        mov     ax,2509h
+        int     21h
+        pop     ds
+        push    ds
+        lds     dx,[OldInt08]
+        mov     ax,2508h
+        int     21h
+        pop     ds
+        mov     al,36h
+        out     43h,al
+        xor     al,al                   ; divisor 0 = 65536 = 18.2 Hz
+        out     40h,al
+        out     40h,al
+        sti
+        popa
+        ret
+
+; =============================================================================
+;  DATA  (constants first, then variables grouped by purpose)
+; =============================================================================
+MsgNoMem        db 'Not enough memory to run MARIO.COM',13,10,'$'
+MsgTest         db 'MARIO COLOUR TEST - PRESS ANY KEY',0
+
+; 16 colours, 6-bit VGA values (r,g,b): see the COL_xxx constants
+; LEVEL 1 = SPRING: soft blue sky, fresh greens, pink blossom bricks
+Palette:        db  0, 0, 0,   36,54,63,   58, 8, 6,   63,48,40     ; black spring-sky red skin
+                db 38,22, 8,   16, 7, 4,   63,63,63,    4,24,58     ; brown dark white blue
+                db 22,54,16,    6,38,18,   63,40,10,   56,42,24     ; fresh-green dgreen orange tan
+                db 63,56, 4,   46,46,50,   50,63,34,   58,30,40     ; yellow gray lime blossom-pink
+
+; LEVEL 2 = AUTUMN: dusky rose sky, maple orange and rust, deep red bricks
+PaletteNight:   db  0, 0, 0,   50,32,34,   56,12,10,   60,46,40     ; black dusk-sky red skin
+                db 30,16, 8,   14, 6, 4,   63,60,54,   10,24,63     ; brown dark warm-white blue
+                db 54,26, 4,   36,12, 4,   63,44, 8,   52,38,24     ; maple-orange rust gold tan
+                db 63,58,16,   40,36,40,   62,52,10,   44,10, 8     ; yellow gray gold deep-red
+
+TileChars       db '.GB?ME[]()SoF'      ; character -> tile code (index = code)
+TileAddr        dw 0, TileGround, TileBrick, TileQuestion, TileQuestion, TileEmpty
+                dw TilePipeTL, TilePipeTR, TilePipeBL, TilePipeBR, TileStair, SprCoin, TilePole
+MarioSmallTbl   dw SprMarioSmallStand, SprMarioSmallRun, SprMarioSmallJump
+MarioSuperTbl   dw SprMarioSuperStand, SprMarioSuperRun, SprMarioSuperJump
+ChainTbl        dw 100,200,400,500,800,1000,2000,4000,5000,8000   ; stomp chain
+StateTable      dw HandleTitle, HandlePlaying, HandlePaused, HandleDying
+                dw HandleLifeLost, HandleWinSeq, HandleLevelComp, HandleGameOver, HandleTitle
+SunRects        dw 270,14,20,4,COL_ORANGE, 266,18,28,12,COL_ORANGE, 270,30,20,4,COL_ORANGE
+                dw 272,18,16,12,COL_YELLOW, 268,22,24,4,COL_YELLOW
+CloudX          dw 30,150,260,380,470,560
+CloudY          dw 24,40,28,48,24,36
+BushX           dw 48,352,540,760
+StarX           dw 165,202,24,187,29,109,44,214,123,282,63,298,295,285,148,73,157,92,96,49,30,105,299,185,127,294,268,175
+StarY           dw 39,103,29,94,84,24,75,28,31,74,48,27,94,37,73,89,91,33,67,90,99,83,78,58,43,58,83,113
+StarCol         db COL_ORANGE,COL_YELLOW,COL_BRICK,COL_ORANGE   ; falling autumn leaves (flicker)
+MoonHW          db 0,5,7,8,9,10,10,11,11,12,12,12,12,12,12,12,11,11,10,10,9,8,7,5,0
+HillX           dw 0,110,230,340,460
+TreeX           dw 56,120,344,408,568,608
+; ---- per-level tables, indexed by CurLevel*2 (level 1 = day, level 2 = night)
+PaletteTbl      dw Palette, PaletteNight
+LevelTextTbl    dw LevelText, LevelText2
+EntInitTbl      dw EntInit, EntInit2
+LevelTimeTbl    dw START_TIME, 200                      ; level 2 is shorter (a bit harder)
+GoombaSpdTbl    dw GOOMBA_V, 00B0h                      ; level 2 enemies are faster (a bit harder)
+KoopaSpdTbl     dw KOOPA_V, 0100h
+WorldNoTbl      dw StrWorldNo, StrWorldNo2
+WorldBigTbl     dw StrWorldBig, StrWorldBig2
+LevelCompTbl    dw StrLevelComp, StrGameComp
+
+StrScore        db 'SCORE',0
+StrCoins        db 'COINS',0
+StrWorld        db 'WORLD',0
+StrTime         db 'TIME',0
+StrLives        db 'LIVES',0
+StrHealth       db 'HEALTH',0
+StrWorldNo      db '1-1',0
+StrWorldNo2     db '1-2',0
+StrTitle        db 'SUPER MARIO',0
+StrEngine       db 'E N G I N E',0
+StrStart        db 'START GAME',0
+StrExit         db 'EXIT',0
+StrTeam         db 'GROUP|Umama,Aiza,Ali',0
+StrPaused       db 'PAUSED',0
+StrResume       db 'Press P to resume',0
+StrWorldBig     db 'WORLD 1-1',0
+StrWorldBig2    db 'WORLD 1-2',0
+StrGameComp     db 'GAME COMPLETE!',0
+StrLivesLeft    db 'LIVES LEFT',0
+StrLevelComp    db 'LEVEL COMPLETE!',0
+StrScoreLbl     db 'SCORE',0
+StrCoinsLbl     db 'COINS',0
+StrTimeLeft     db 'TIME LEFT',0
+StrX50          db ' x 50',0
+StrBonus        db 'TIME BONUS',0
+StrFinal        db 'FINAL SCORE',0
+StrPressEnter   db 'Press ENTER to continue',0
+StrGameOver     db 'GAME OVER',0
+StrFinalScore   db 'Final Score:',0
+StrCoinsC       db 'Coins:',0
+StrTimeC        db 'Time:',0
+StrPressTitle   db 'Press ENTER for the title',0
+
+; ---- initial enemy table: 4 Goombas and 2 Koopas, 4 free slots (mushrooms)
+%macro ENTITY 2                         ; type, map column
+        db      %1, ES_WAIT             ; type, state
+        dw      %2*TILE                 ; world x
+        db      0, 0                    ; x fraction, kick grace
+        dw      (GROUND_TOP_Y-16)*256   ; y (8.8)
+        dw      0, 0, 0, 0              ; vx, vy, timer, aux
+%endmacro
+EntInit:        ENTITY ET_GOOMBA, 8
+                ENTITY ET_GOOMBA, 17
+                ENTITY ET_KOOPA,  22
+                ENTITY ET_GOOMBA, 31
+                ENTITY ET_GOOMBA, 36
+                ENTITY ET_KOOPA,  42
+                times (ENT_MAX-6)*ENT_SIZE db 0
+
+; ---- level 2 (autumn): 8 enemies, 4 free slots.  Columns are on solid ground.
+EntInit2:       ENTITY ET_GOOMBA, 6
+                ENTITY ET_GOOMBA, 12
+                ENTITY ET_KOOPA,  16
+                ENTITY ET_GOOMBA, 18
+                ENTITY ET_GOOMBA, 26
+                ENTITY ET_KOOPA,  31
+                ENTITY ET_GOOMBA, 38
+                ENTITY ET_GOOMBA, 48
+                times (ENT_MAX-8)*ENT_SIZE db 0
