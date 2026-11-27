@@ -2263,3 +2263,374 @@ ShellKills:
         popa
         pop     bp
         ret     2
+
+
+; -----------------------------------------------------------------------------
+; UpdateOneEntity(rec)
+; Purpose : one frame of Goomba / Koopa / shell / mushroom behaviour:
+;           removal far left, activation near the screen, walking, turning at
+;           walls (and Koopa ledges), falling, flat timer, shell sliding.
+; Changes : none
+; -----------------------------------------------------------------------------
+UpdateOneEntity:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,[bp+4]
+        mov     ax,[si+E_X]
+        sub     ax,[CamX]               ; screen x
+        cmp     ax,-48
+        jge     .keep
+        mov     byte [si+E_TYPE],ET_NONE        ; left far behind: removed
+        jmp     .out
+.keep:  cmp     byte [si+E_STATE],ES_WAIT
+        jne     .act
+        cmp     ax,SCREEN_W+16          ; wait until within one tile of the screen
+        jge     near .out
+        mov     byte [si+E_STATE],ES_WALK
+        mov     ax,[GoombaSpd]          ; speeds depend on the level
+        cmp     byte [si+E_TYPE],ET_KOOPA
+        jne     .setv
+        mov     ax,[KoopaSpd]
+.setv:  neg     ax
+        mov     [si+E_VX],ax
+        jmp     .out
+.act:   mov     al,[si+E_TYPE]
+        cmp     al,ET_GOOMBA
+        je      .walker
+        cmp     al,ET_KOOPA
+        je      .walker
+        cmp     al,ET_SHELL
+        je      .shell
+        cmp     al,ET_MUSH
+        je      near .mush
+        jmp     .out
+
+.walker:cmp     byte [si+E_STATE],ES_FLAT
+        jne     .wmove
+        dec     word [si+E_TIMER]       ; flat Goomba disappears after ~1 s
+        jnz     near .out
+        mov     byte [si+E_TYPE],ET_NONE
+        jmp     .out
+.wmove: mov     bx,[si+E_X]
+        mov     cl,[si+E_XF]            ; remember the old position
+        push    si
+        call    EntMoveX
+        push    si
+        call    EntWallHit
+        test    ax,ax
+        jnz     .turn
+        push    si
+        call    EntHitsOther
+        test    ax,ax
+        jnz     .turn
+        cmp     byte [si+E_TYPE],ET_KOOPA
+        jne     .wfall
+        push    si
+        call    EntOnGround
+        test    ax,ax
+        jz      .wfall
+        push    si
+        call    EntGroundAhead
+        test    ax,ax
+        jnz     .wfall                  ; the Koopa turns at platform edges
+.turn:  mov     [si+E_X],bx
+        mov     [si+E_XF],cl
+        neg     word [si+E_VX]
+.wfall: push    si
+        call    EntFall
+        jmp     .below
+
+.shell: cmp     byte [si+E_GRACE],0
+        je      .sg
+        dec     byte [si+E_GRACE]
+.sg:    cmp     byte [si+E_STATE],ES_SLIDE
+        jne     .sfall
+        mov     bx,[si+E_X]
+        mov     cl,[si+E_XF]
+        push    si
+        call    EntMoveX
+        push    si
+        call    EntWallHit
+        test    ax,ax
+        jz      .skill
+        mov     [si+E_X],bx             ; bounce off the wall
+        mov     [si+E_XF],cl
+        neg     word [si+E_VX]
+.skill: push    si
+        call    ShellKills
+.sfall: push    si
+        call    EntFall
+        jmp     .below
+
+.mush:  mov     bx,[si+E_X]
+        mov     cl,[si+E_XF]
+        push    si
+        call    EntMoveX
+        push    si
+        call    EntWallHit
+        test    ax,ax
+        jz      .mfall
+        mov     [si+E_X],bx
+        mov     [si+E_XF],cl
+        neg     word [si+E_VX]
+.mfall: push    si
+        call    EntFall
+
+.below: mov     ax,[si+E_Y]             ; fell below the map: removed
+        shr     ax,8
+        cmp     ax,SCREEN_H-8
+        jb      .out
+        mov     byte [si+E_TYPE],ET_NONE
+.out:   popa
+        pop     bp
+        ret     2
+
+; UpdateEntities : runs UpdateOneEntity for every used record of the table.
+UpdateEntities:
+        pusha
+        mov     si,EntTbl
+        mov     cx,ENT_MAX
+.l:     cmp     byte [si+E_TYPE],ET_NONE
+        je      .n
+        push    si
+        call    UpdateOneEntity
+.n:     add     si,ENT_SIZE
+        loop    .l
+        popa
+        ret
+
+; -----------------------------------------------------------------------------
+; StompScore(x, y)
+; Purpose : stomp chain (Section 5.4): the chain counter indexes a word table;
+;           the 11th and later stomp in one jump give a life instead.
+; Changes : none
+; -----------------------------------------------------------------------------
+StompScore:
+        push    bp
+        mov     bp,sp
+        pusha
+        xor     bx,bx
+        mov     bl,[StompChain]
+        cmp     bl,10
+        jae     .oneup
+        shl     bx,1
+        mov     ax,[ChainTbl+bx]
+        push    ax
+        call    AddScore
+        push    word 1
+        push    word [bp+6]
+        push    word [bp+4]
+        push    ax
+        call    SpawnEffect
+        jmp     .inc
+.oneup: call    AddLife
+.inc:   cmp     byte [StompChain],200
+        jae     .out
+        inc     byte [StompChain]
+.out:   popa
+        pop     bp
+        ret     4
+
+; -----------------------------------------------------------------------------
+; BounceMario(enemy_top)
+; Purpose : Mario bounces off an enemy; higher if the jump key is held.  His
+;           feet are placed on the enemy's top so he is not inside it.
+; Changes : none
+; -----------------------------------------------------------------------------
+BounceMario:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     word [MarioVY],BOUNCE_V
+        cmp     byte [KeyTbl+SC_SPACE],0
+        je      .b
+        mov     word [MarioVY],BOUNCE_HI_V
+.b:     mov     byte [OnGround],0
+        call    MarioHeight
+        mov     bx,[bp+4]
+        sub     bx,ax                   ; top = enemy top - height
+        jns     .bok
+        xor     bx,bx                   ; FIX: never above the top of the screen
+.bok:   shl     bx,8
+        mov     [MarioY],bx
+        popa
+        pop     bp
+        ret     2
+
+; HurtMario : Section 5.7.  Super -> Small (feet fixed, 2 s invulnerable);
+;             Small -> dies.  Ignored while invulnerable.
+HurtMario:
+        cmp     word [InvulnT],0
+        jne     .r
+        cmp     byte [Form],0
+        je      .die
+        mov     byte [Form],0
+        mov     byte [HP],1
+        add     word [MarioY],16*256    ; keep the feet where they are
+        mov     word [InvulnT],INVULN_TICKS
+        ret
+.die:   push    word 1
+        call    StartDeath
+.r:     ret
+
+; -----------------------------------------------------------------------------
+; ResolveOne(rec)
+; Purpose : Section 5.6 for one entity: rectangle overlap, stomp test, kick,
+;           hurt or collect.
+; Changes : none
+; -----------------------------------------------------------------------------
+ResolveOne:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,[bp+4]
+        mov     al,[si+E_STATE]
+        cmp     al,ES_WAIT
+        je      near .out
+        cmp     al,ES_FLAT
+        je      near .out
+        call    MarioHeight
+        mov     di,ax                   ; di = Mario height
+        mov     bx,[MarioY]
+        shr     bx,8                    ; bx = Mario top
+        mov     dx,[si+E_Y]
+        shr     dx,8                    ; dx = enemy top
+        mov     cx,[si+E_X]
+        mov     ax,[MarioXPix]
+        add     ax,2
+        push    ax                      ; Mario hit box x0
+        push    bx                      ;                y0
+        add     ax,12
+        push    ax                      ;                x1
+        mov     ax,bx
+        add     ax,di
+        push    ax                      ;                y1
+        mov     ax,cx
+        add     ax,2
+        push    ax                      ; entity hit box x0
+        push    dx                      ;                y0
+        add     ax,12
+        push    ax                      ;                x1
+        mov     ax,dx
+        add     ax,16
+        push    ax                      ;                y1
+        call    RectOverlap
+        test    ax,ax
+        jz      near .out
+        mov     al,[si+E_TYPE]
+        cmp     al,ET_MUSH
+        je      near .mush
+        cmp     al,ET_SHELL
+        je      .shell
+        ; ---- Goomba or Koopa
+        call    StompTest               ; AX = 1 if this is a stomp (dx = enemy top)
+        test    ax,ax
+        jz      .hurt
+        push    word [si+E_X]
+        push    dx
+        call    StompScore
+        push    dx
+        call    BounceMario
+        cmp     byte [si+E_TYPE],ET_KOOPA
+        je      .toshell
+        mov     byte [si+E_STATE],ES_FLAT       ; flattened Goomba, about 1 s
+        mov     word [si+E_TIMER],TICKS_PER_SEC
+        mov     word [si+E_VX],0
+        jmp     .out
+.toshell:
+        mov     byte [si+E_TYPE],ET_SHELL
+        mov     byte [si+E_STATE],ES_STILL
+        mov     word [si+E_VX],0
+        mov     byte [si+E_GRACE],8
+        jmp     .out
+.hurt:  call    HurtMario
+        jmp     .out
+
+.shell: cmp     byte [si+E_GRACE],0
+        jne     near .out                    ; just kicked: ignores Mario
+        cmp     byte [si+E_STATE],ES_STILL
+        je      .kick
+        call    StompTest               ; sliding shell
+        test    ax,ax
+        jz      .hurt
+        push    word [si+E_X]
+        push    dx
+        call    StompScore
+        push    dx
+        call    BounceMario
+        mov     byte [si+E_STATE],ES_STILL      ; stomped: stops
+        mov     word [si+E_VX],0
+        mov     byte [si+E_GRACE],8
+        jmp     .out
+.kick:  push    word 400
+        call    AddScore
+        push    word 1
+        push    word [si+E_X]
+        push    dx
+        push    word 400
+        call    SpawnEffect
+        call    StompTest
+        test    ax,ax
+        jz      .nobounce
+        push    dx
+        call    BounceMario
+.nobounce:
+        mov     word [si+E_VX],SHELL_V          ; slide away from Mario
+        mov     ax,[si+E_X]
+        cmp     ax,[MarioXPix]
+        jge     .kgo
+        mov     word [si+E_VX],-SHELL_V
+.kgo:   mov     byte [si+E_STATE],ES_SLIDE
+        mov     byte [si+E_GRACE],8
+        jmp     .out
+
+.mush:  push    word 1000
+        call    AddScore
+        push    word 1
+        push    word [si+E_X]
+        push    dx
+        push    word 1000
+        call    SpawnEffect
+        cmp     byte [Form],0
+        jne     .mgone
+        mov     byte [Form],1           ; Small -> Super, HP 2, feet fixed
+        mov     byte [HP],2
+        sub     word [MarioY],16*256
+        jnc     .mgone
+        mov     word [MarioY],0         ; FIX: clamp at the top of the screen
+.mgone: mov     byte [si+E_TYPE],ET_NONE
+.out:   popa
+        pop     bp
+        ret     2
+
+; StompTest : AX = 1 when Mario is moving down and, in the previous frame, his
+;             feet were above the upper half of the enemy (DX = enemy top).
+StompTest:
+        xor     ax,ax
+        cmp     word [MarioVY],0
+        jle     .r
+        mov     ax,dx
+        add     ax,8
+        cmp     [PrevFeet],ax
+        jle     .yes
+        xor     ax,ax
+        ret
+.yes:   mov     ax,1
+.r:     ret
+
+; ResolveMario : runs ResolveOne for every entity (stop if the state changes).
+ResolveMario:
+        pusha
+        mov     si,EntTbl
+        mov     cx,ENT_MAX
+.l:     cmp     byte [GameState],ST_PLAYING
+        jne     .out
+        cmp     byte [si+E_TYPE],ET_NONE
+        je      .n
+        push    si
+        call    ResolveOne
+.n:     add     si,ENT_SIZE
+        loop    .l
+.out:   popa
+        ret
