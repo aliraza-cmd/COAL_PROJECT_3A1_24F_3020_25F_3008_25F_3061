@@ -506,3 +506,101 @@ DrawBits8:
         popa
         pop     bp
         ret     10
+
+
+; -----------------------------------------------------------------------------
+; DrawChar(x, y, ch, colour, scale)
+; Purpose : copies the glyph of ch from the ROM font to CharBuf, then draws it.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawChar:
+        push    bp
+        mov     bp,sp
+        pusha
+        push    es
+        push    ds
+        mov     bx,[bp+8]
+        and     bx,7Fh
+        shl     bx,3                    ; 8 bytes per glyph
+        add     bx,[FontOff]
+        mov     ax,[FontSeg]
+        mov     si,bx
+        mov     bx,cs
+        mov     es,bx                   ; ES = CS (destination of MOVSB)
+        mov     di,CharBuf
+        mov     ds,ax                   ; DS = font segment
+        mov     cx,8
+        cld
+        rep     movsb
+        pop     ds
+        pop     es
+        push    word [bp+12]
+        push    word [bp+10]
+        push    word CharBuf
+        push    word [bp+6]
+        push    word [bp+4]
+        call    DrawBits8
+        popa
+        pop     bp
+        ret     10
+
+; -----------------------------------------------------------------------------
+; DrawString(x, y, address, colour, scale)   zero-terminated string
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawString:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,[bp+8]
+        mov     bx,[bp+12]              ; current x
+        mov     di,[bp+4]
+        shl     di,3                    ; advance = 8*scale
+.next:  xor     ax,ax
+        mov     al,[si]
+        test    al,al
+        jz      .done
+        push    bx
+        push    word [bp+10]
+        push    ax
+        push    word [bp+6]
+        push    word [bp+4]
+        call    DrawChar
+        add     bx,di
+        inc     si
+        jmp     .next
+.done:  popa
+        pop     bp
+        ret     10
+
+; -----------------------------------------------------------------------------
+; DrawCentered(y, address, colour, scale)
+; Purpose : draws a zero-terminated string centred horizontally.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawCentered:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,[bp+8]
+        xor     cx,cx                   ; length
+.len:   cmp     byte [si],0
+        je      .got
+        inc     cx
+        inc     si
+        jmp     .len
+.got:   mov     ax,[bp+4]
+        shl     ax,3
+        mul     cx                      ; pixel width = len*8*scale
+        mov     bx,SCREEN_W
+        sub     bx,ax
+        sar     bx,1                    ; x = (320-width)/2   FIX: signed shift (wide text)
+        push    bx
+        push    word [bp+10]
+        push    word [bp+8]
+        push    word [bp+6]
+        push    word [bp+4]
+        call    DrawString
+        popa
+        pop     bp
+        ret     8
