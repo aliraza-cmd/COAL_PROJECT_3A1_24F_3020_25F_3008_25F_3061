@@ -2721,3 +2721,450 @@ ScanMarioTiles:
         pop     bx
         pop     bp
         ret     2
+; =============================================================================
+;  MODULE 15 : DEATH, WIN, RESTART
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; StartDeath(kind)
+; Purpose : Section 5.8 step 1-2: freeze the game and enter the DYING state.
+;           kind 0 = pit (no upward hop), kind 1 = enemy / clock (hop up).
+; Changes : none
+; -----------------------------------------------------------------------------
+StartDeath:
+        push    bp
+        mov     bp,sp
+        mov     byte [GameState],ST_DYING
+        mov     word [DeathTimer],45    ; about 1.5 s
+        mov     word [MarioVX],0
+        mov     word [MarioVY],0
+        cmp     word [bp+4],0
+        je      .pit
+        mov     word [MarioVY],DEATH_HOP_V
+.pit:   mov     byte [Pose],2
+        mov     byte [OnGround],0
+        pop     bp
+        ret     2
+
+; -----------------------------------------------------------------------------
+; StartWin
+; Purpose : Section 5.11 step 1: flag points by the height of contact (the map
+;           row of Mario's feet), snap Mario to the pole, enter WINSEQ.
+; Changes : none
+; -----------------------------------------------------------------------------
+StartWin:
+        pusha
+        call    MarioHeight
+        mov     bx,[MarioY]
+        shr     bx,8
+        add     bx,ax
+        dec     bx
+        shr     bx,4                    ; row of the feet
+        mov     ax,5000
+        cmp     bx,3
+        jbe     .pts
+        mov     ax,2000
+        cmp     bx,4
+        je      .pts
+        mov     ax,800
+        cmp     bx,5
+        je      .pts
+        mov     ax,400
+        cmp     bx,7
+        jbe     .pts
+        mov     ax,100
+.pts:   push    ax
+        call    AddScore
+        mov     dx,bx
+        shl     dx,4
+        push    word 1
+        push    word POLE_X+16
+        push    dx
+        push    ax
+        call    SpawnEffect
+        mov     byte [GameState],ST_WINSEQ
+        mov     byte [WinPhase],0
+        mov     word [WinTimer],0
+        mov     word [MarioXPix],POLE_X-6
+        mov     word [MarioXFr],0
+        mov     word [MarioVX],0
+        mov     word [MarioVY],0
+        mov     byte [Facing],0
+        mov     byte [Pose],0
+        popa
+        ret
+
+; NewGame : score, coins, lives and everything else back to their start values.
+NewGame:
+        mov     word [ScoreLo],0
+        mov     word [ScoreHi],0
+        mov     byte [Coins],0
+        mov     byte [Lives],START_LIVES
+        call    ResetLevel
+        ret
+
+; -----------------------------------------------------------------------------
+; ResetLevel
+; Purpose : map (block move from the original), enemies, mushrooms, effects,
+;           clock, camera and Mario go back to the start of the level.  Score,
+;           coins and lives are NOT touched.
+; Changes : none
+; -----------------------------------------------------------------------------
+ResetLevel:
+        pusha
+        push    es
+        call    ResetMap
+        mov     ax,cs
+        mov     es,ax
+        xor     bx,bx
+        mov     bl,[CurLevel]
+        shl     bx,1                    ; word index of the current level
+        mov     si,[EntInitTbl+bx]
+        mov     di,EntTbl
+        mov     cx,ENT_MAX*ENT_SIZE/2
+        cld
+        rep     movsw                   ; enemies back to their start positions
+        mov     di,EffTbl
+        mov     cx,EFF_MAX*EFF_SIZE/2
+        xor     ax,ax
+        rep     stosw                   ; no effects
+        mov     word [MarioXPix],MARIO_START_X
+        mov     word [MarioXFr],0
+        mov     word [MarioY],(GROUND_TOP_Y-16)*256
+        mov     word [MarioVX],0
+        mov     word [MarioVY],0
+        mov     byte [Facing],0
+        mov     byte [OnGround],1
+        mov     byte [Form],0
+        mov     byte [HP],1
+        mov     byte [Pose],0
+        mov     byte [HideMario],0
+        mov     byte [StompChain],0
+        mov     byte [JumpBuf],0
+        mov     word [InvulnT],0
+        mov     word [CamX],0
+        mov     ax,[LevelTimeTbl+bx]
+        mov     [Time],ax
+        mov     ax,[GoombaSpdTbl+bx]
+        mov     [GoombaSpd],ax
+        mov     ax,[KoopaSpdTbl+bx]
+        mov     [KoopaSpd],ax
+        mov     word [ClockAcc],0
+        pop     es
+        popa
+        ret
+
+; UpdateTimers : clock (one unit per real second, from timer ticks) and the
+;                invulnerability counter (Section 5.10, 5.7).
+UpdateTimers:
+        push    ax
+        mov     ax,[TickDelta]
+        add     [ClockAcc],ax
+.l:     cmp     word [ClockAcc],TICKS_PER_SEC
+        jb      .inv
+        sub     word [ClockAcc],TICKS_PER_SEC
+        cmp     word [Time],0
+        je      .l
+        dec     word [Time]
+        jmp     .l
+.inv:   cmp     word [InvulnT],0
+        je      .r
+        dec     word [InvulnT]
+.r:     pop     ax
+        ret
+
+; CheckDeathAndFlag : step 7 of the frame order: pit, clock, flag pole.
+CheckDeathAndFlag:
+        push    ax
+        mov     ax,[MarioY]
+        shr     ax,8
+        cmp     ax,192
+        jb      .time
+        push    word 0                  ; pit: no hop
+        call    StartDeath
+        jmp     .r
+.time:  cmp     word [Time],0
+        ja      .flag
+        push    word 1                  ; clock reached 0
+        call    StartDeath
+        jmp     .r
+.flag:  push    word 1
+        call    ScanMarioTiles
+        test    ax,ax
+        jz      .r
+        call    StartWin
+.r:     pop     ax
+        ret
+
+; =============================================================================
+;  RENDERING  (Module 5 frame buffer, Module 13 HUD)
+; =============================================================================
+
+; ClearFrame : fills the frame buffer with sky (REP STOSW) and the unused
+;              bottom 8 rows with black.
+ClearFrame:
+        pusha
+        push    es
+        mov     es,[DrawSeg]
+        xor     di,di
+        mov     ax,(COL_SKY<<8)|COL_SKY
+        mov     cx,192*SCREEN_W/2
+        cld
+        rep     stosw
+        xor     ax,ax
+        mov     cx,8*SCREEN_W/2
+        rep     stosw
+        pop     es
+        popa
+        ret
+
+; FlipFrame : copies the frame buffer to video memory with one REP MOVSW.
+FlipFrame:
+        pusha
+        push    ds
+        push    es
+        mov     ax,VGA_SEG
+        mov     es,ax
+        mov     ds,[FrameSeg]
+        xor     si,si
+        xor     di,di
+        mov     cx,32000
+        cld
+        rep     movsw
+        pop     es
+        pop     ds
+        popa
+        ret
+
+; DrawEntities : draws every active record that is on the screen.
+DrawEntities:
+        pusha
+        mov     si,EntTbl
+        mov     cx,ENT_MAX
+.l:     mov     al,[si+E_TYPE]
+        test    al,al
+        jz      .n
+        mov     bx,[si+E_X]
+        sub     bx,[CamX]
+        cmp     bx,-16
+        jle     .n
+        cmp     bx,SCREEN_W
+        jge     .n
+        mov     dx,[si+E_Y]
+        shr     dx,8
+        xor     di,di                   ; flags (mirror)
+        cmp     al,ET_GOOMBA
+        je      .goomba
+        cmp     al,ET_KOOPA
+        je      .koopa
+        cmp     al,ET_SHELL
+        je      .shell
+        mov     ax,SprMushroom
+        jmp     .draw
+.goomba:mov     ax,SprGoomba
+        cmp     byte [si+E_STATE],ES_FLAT
+        jne     .gw
+        mov     ax,SprGoombaFlat
+        jmp     .draw
+.gw:    test    byte [TickCount],8      ; walking animation: mirror every 8 ticks
+        jz      .draw
+        mov     di,1
+        jmp     .draw
+.koopa: mov     ax,SprKoopa
+        cmp     word [si+E_VX],0
+        jle     .draw
+        mov     di,1
+        jmp     .draw
+.shell: mov     ax,SprShell
+.draw:  push    cx
+        push    bx
+        push    dx
+        push    ax
+        push    word 16
+        push    di
+        call    DrawSprite
+        pop     cx
+.n:     add     si,ENT_SIZE
+        loop    .l
+        popa
+        ret
+
+; DrawMario : picks the sprite from form + pose, mirrors it by facing and
+;             blinks (draws every other 2 frames) while invulnerable.
+DrawMario:
+        pusha
+        cmp     byte [HideMario],0
+        jne     .out
+        cmp     word [InvulnT],0
+        je      .draw
+        test    byte [InvulnT],2
+        jnz     .out
+.draw:  xor     bx,bx
+        mov     bl,[Pose]
+        shl     bx,1
+        mov     dx,16
+        mov     ax,[MarioSmallTbl+bx]
+        cmp     byte [Form],0
+        je      .go
+        mov     ax,[MarioSuperTbl+bx]
+        mov     dx,32
+.go:    xor     di,di
+        cmp     byte [Facing],0
+        je      .f
+        mov     di,1
+.f:     mov     bx,[MarioXPix]
+        sub     bx,[CamX]
+        push    bx
+        mov     bx,[MarioY]
+        shr     bx,8
+        push    bx
+        push    ax
+        push    dx
+        push    di
+        call    DrawSprite
+.out:   popa
+        ret
+
+; DrawHUD : black strip + SCORE, COINS, WORLD, TIME, LIVES, HEALTH (Section 5.14)
+DrawHUD:
+        pusha
+        push    word 0
+        push    word 0
+        push    word SCREEN_W
+        push    word 16
+        push    word COL_BLACK
+        call    FillRect
+        ; labels (row 1), values (row 2)
+        push    word 8
+        push    word 0
+        push    word StrScore
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        push    word 72
+        push    word 0
+        push    word StrCoins
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        push    word 120
+        push    word 0
+        push    word StrWorld
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        mov     bx,COL_YELLOW           ; "hurry" blink when the time is below 100
+        cmp     word [Time],100
+        jae     .t
+        test    byte [TickCount],8
+        jz      .t
+        mov     bx,COL_RED
+.t:     push    word 168
+        push    word 0
+        push    word StrTime
+        push    bx
+        push    word 1
+        call    DrawString
+        push    word 216
+        push    word 0
+        push    word StrLives
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        push    word 264
+        push    word 0
+        push    word StrHealth
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        ; values
+        push    word 8
+        push    word 8
+        push    word [ScoreHi]
+        push    word [ScoreLo]
+        push    word 6
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 72
+        push    word 8
+        push    word 'x'
+        push    word COL_WHITE
+        push    word 1
+        call    DrawChar
+        xor     ax,ax
+        mov     al,[Coins]
+        push    word 80
+        push    word 8
+        push    word 0
+        push    ax
+        push    word 2
+        push    word COL_WHITE
+        call    DrawNumber
+        push    bx
+        xor     bx,bx
+        mov     bl,[CurLevel]
+        shl     bx,1
+        mov     bx,[WorldNoTbl+bx]      ; "1-1" or "1-2"
+        push    word 120
+        push    word 8
+        push    bx
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        pop     bx
+        push    word 168
+        push    word 8
+        push    word 0
+        push    word [Time]
+        push    word 3
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 216
+        push    word 8
+        push    word 'x'
+        push    word COL_WHITE
+        push    word 1
+        call    DrawChar
+        xor     ax,ax
+        mov     al,[Lives]
+        push    word 224
+        push    word 8
+        push    word 0
+        push    ax
+        push    word 0
+        push    word COL_WHITE
+        call    DrawNumber
+        ; hearts: first always filled; second filled only as Super Mario
+        push    word 264
+        push    word 8
+        push    word HeartMask
+        push    word COL_RED
+        push    word 1
+        call    DrawBits8
+        mov     bx,COL_RED
+        cmp     byte [HP],2
+        jae     .h2
+        mov     bx,COL_GRAY
+.h2:    push    word 276
+        push    word 8
+        push    word HeartMask
+        push    bx
+        push    word 1
+        call    DrawBits8
+        popa
+        ret
+
+; RenderWorld : steps 9 of the frame order: clear, background, tiles, items,
+;               enemies, Mario, effects, HUD.
+RenderWorld:
+        call    ClearFrame
+        call    DrawBackground
+        call    DrawMap
+        call    DrawEntities
+        call    DrawMario
+        call    DrawEffects
+        call    DrawHUD
+%ifdef TESTMODE
+        call    TestOverlay             ; test build only: numbers in the black bottom strip
+%endif
+        ret
