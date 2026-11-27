@@ -3168,3 +3168,674 @@ RenderWorld:
         call    TestOverlay             ; test build only: numbers in the black bottom strip
 %endif
         ret
+; =============================================================================
+;  MODULE 14 : GAME STATES, SCREENS AND MENUS
+; =============================================================================
+
+; GetKey : AL = next make code from the keyboard queue (0 if empty).
+GetKey:
+        push    bx
+        xor     ax,ax
+        mov     bl,[KeyHead]
+        cmp     bl,[KeyTail]
+        je      .r
+        xor     bh,bh
+        mov     al,[KeyQueue+bx]
+        inc     bl
+        and     bl,15
+        mov     [KeyHead],bl
+.r:     pop     bx
+        ret
+
+; FlushKeys : throws away every queued key press.
+FlushKeys:
+        push    ax
+        mov     al,[KeyTail]
+        mov     [KeyHead],al
+        pop     ax
+        ret
+
+; WaitTick : step 1 of the frame: sleep until the timer interrupt has counted
+;            at least one new tick; TickDelta = ticks since the last frame.
+WaitTick:
+        push    ax
+        push    dx
+.w:     mov     ax,[TickCount]
+        cmp     ax,[LastTick]
+        jne     .got
+        sti
+        hlt
+        jmp     .w
+.got:   mov     dx,ax
+        sub     dx,[LastTick]
+        cmp     dx,6
+        jbe     .ok
+        mov     dx,6                    ; never jump more than 6 ticks
+.ok:    mov     [TickDelta],dx
+        mov     [LastTick],ax
+        pop     dx
+        pop     ax
+        ret
+
+; ------------------------------------------------------------ TITLE (state 0)
+HandleTitle:
+        pusha
+        cmp     byte [CurLevel],0
+        je      .keys
+        mov     byte [CurLevel],0       ; coming back from level 2: day palette again
+        call    LoadLevel
+.keys:  call    GetKey
+        test    al,al
+        jz      .draw
+        cmp     al,SC_UP
+        jne     .d
+        mov     byte [TitleSel],0
+        jmp     .keys
+.d:     cmp     al,SC_DOWN
+        jne     .e
+        mov     byte [TitleSel],1
+        jmp     .keys
+.e:     cmp     al,SC_ESC
+        jne     .en
+        mov     byte [GameState],ST_EXIT
+        jmp     .out
+.en:    cmp     al,SC_ENTER
+        jne     .keys
+        cmp     byte [TitleSel],0
+        jne     .quit
+        call    NewGame
+        call    FlushKeys
+        mov     byte [GameState],ST_PLAYING
+        jmp     .out
+.quit:  mov     byte [GameState],ST_EXIT
+        jmp     .out
+.draw:  call    DrawTitleScreen
+        call    FlipFrame
+.out:   popa
+        ret
+
+; DrawTitleScreen : brick border, game name, START / EXIT box, team line.
+DrawTitleScreen:
+        pusha
+        call    ClearFrame
+        xor     si,si                   ; brick border, top and bottom rows
+.bx:    mov     ax,si
+        shl     ax,4
+        push    ax
+        push    word 0
+        push    word TileBrick
+        call    DrawTileOpaque
+        push    ax
+        push    word 176
+        push    word TileBrick
+        call    DrawTileOpaque
+        inc     si
+        cmp     si,20
+        jb      .bx
+        mov     si,1                    ; left and right columns
+.by:    mov     ax,si
+        shl     ax,4
+        push    word 0
+        push    ax
+        push    word TileBrick
+        call    DrawTileOpaque
+        push    word 304
+        push    ax
+        push    word TileBrick
+        call    DrawTileOpaque
+        inc     si
+        cmp     si,11
+        jb      .by
+        ; ground strip with Mario and a Goomba
+        xor     si,si
+.gr:    mov     ax,si
+        shl     ax,4
+        add     ax,16
+        push    ax
+        push    word 160
+        push    word TileGround
+        call    DrawTileOpaque
+        inc     si
+        cmp     si,18
+        jb      .gr
+        push    word 32
+        push    word 144
+        push    word SprMarioSmallStand
+        push    word 16
+        push    word 0
+        call    DrawSprite
+        push    word 272
+        push    word 144
+        push    word SprGoomba
+        push    word 16
+        push    word 1
+        call    DrawSprite
+        ; title text with a dark shadow
+        push    word 31
+        push    word 43
+        push    word StrTitle
+        push    word COL_RED
+        push    word 3
+        call    DrawString
+        push    word 28
+        push    word 40
+        push    word StrTitle
+        push    word COL_YELLOW
+        push    word 3
+        call    DrawString
+        push    word 72
+        push    word 76
+        push    word StrEngine
+        push    word COL_WHITE
+        push    word 2
+        call    DrawString
+        ; menu box
+        push    word 96
+        push    word 104
+        push    word 128
+        push    word 44
+        push    word COL_WHITE
+        call    FillRect
+        push    word 98
+        push    word 106
+        push    word 124
+        push    word 40
+        push    word COL_BLACK
+        call    FillRect
+        mov     bx,COL_YELLOW
+        mov     dx,COL_WHITE
+        cmp     byte [TitleSel],0
+        je      .sel
+        xchg    bx,dx
+.sel:   push    word 112
+        push    word 114
+        push    word StrStart
+        push    bx
+        push    word 1
+        call    DrawString
+        push    word 112
+        push    word 130
+        push    word StrExit
+        push    dx
+        push    word 1
+        call    DrawString
+        mov     ax,114                  ; the > cursor
+        cmp     byte [TitleSel],0
+        je      .cur
+        mov     ax,130
+.cur:   push    word 104
+        push    ax
+        push    word '>'
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawChar
+        push    word 166
+        push    word StrTeam
+        push    word COL_WHITE
+        push    word 1
+        call    DrawCentered
+        popa
+        ret
+
+; ------------------------------------------------------------ PLAYING (state 1)
+HandlePlaying:
+        pusha
+        ; ---- keys that are events: P, Esc and the two debug keys
+.keys:  call    GetKey
+        test    al,al
+        jz      .upd
+        cmp     al,SC_P
+        jne     .esc
+        mov     byte [GameState],ST_PAUSED
+        jmp     .keys
+.esc:   cmp     al,SC_ESC
+        jne     .f1
+        mov     byte [GameState],ST_TITLE
+        call    FlushKeys
+        jmp     .out
+.f1:    cmp     al,SC_F1
+        jne     .f2
+        mov     word [Time],5           ; debug: clock = 5
+        mov     word [ClockAcc],0
+        jmp     .keys
+.f2:    cmp     al,SC_F2
+        jne     .f3
+        mov     byte [Coins],99         ; debug: coins = 99
+        jmp     .keys
+.f3:    cmp     al,SC_F3
+        jne     .keys
+        xor     byte [CurLevel],1       ; debug: jump to the other level (1 <-> 2)
+        call    LoadLevel               ; its map and palette
+        call    ResetLevel              ; start of that level (score/coins/lives kept)
+        jmp     .keys
+.upd:   cmp     byte [GameState],ST_PLAYING
+        jne     .out
+        call    UpdateMario             ; step 3
+        call    UpdateEntities          ; step 4
+        call    ResolveMario            ; step 5
+        cmp     byte [GameState],ST_PLAYING
+        jne     .draw
+        push    word 0
+        call    ScanMarioTiles          ; collect coins
+        call    UpdateTimers            ; step 6
+        call    UpdateEffects
+        call    CheckDeathAndFlag       ; step 7
+        cmp     byte [GameState],ST_PLAYING
+        jne     .draw
+        call    UpdateCamera            ; step 8
+.draw:  call    RenderWorld             ; step 9
+        call    FlipFrame               ; step 10
+.out:   popa
+        ret
+
+; ------------------------------------------------------------ PAUSED (state 2)
+HandlePaused:
+        pusha
+.keys:  call    GetKey
+        test    al,al
+        jz      .draw
+        cmp     al,SC_P
+        jne     .esc
+        mov     byte [GameState],ST_PLAYING
+        call    FlushKeys
+        jmp     .out
+.esc:   cmp     al,SC_ESC
+        jne     .keys
+        mov     byte [GameState],ST_TITLE
+        call    FlushKeys
+        jmp     .out
+.draw:  push    word 84                 ; the game picture stays; box on top
+        push    word 68
+        push    word 152
+        push    word 56
+        push    word COL_WHITE
+        call    FillRect
+        push    word 87
+        push    word 71
+        push    word 146
+        push    word 50
+        push    word COL_BLACK
+        call    FillRect
+        push    word 82
+        push    word StrPaused
+        push    word COL_YELLOW
+        push    word 2
+        call    DrawCentered
+        push    word 106
+        push    word StrResume
+        push    word COL_WHITE
+        push    word 1
+        call    DrawCentered
+        call    FlipFrame
+.out:   popa
+        ret
+
+; ------------------------------------------------------------ DYING (state 3)
+HandleDying:
+        pusha
+        call    FlushKeys               ; controls are disabled
+        mov     ax,[MarioVY]
+        add     ax,GRAVITY              ; falls with gravity, no collisions
+        cmp     ax,FALL_MAX
+        jle     .g
+        mov     ax,FALL_MAX
+.g:     mov     [MarioVY],ax
+        test    ax,ax
+        js      .dup
+        add     [MarioY],ax
+        jmp     .dok
+.dup:   add     [MarioY],ax
+        jc      .dok                    ; FIX: carry = still >= 0, no wrap
+        mov     word [MarioY],0         ;      hop hit the top of the screen:
+        mov     word [MarioVY],0        ;      stop rising and start falling
+.dok:   mov     bx,[MarioY]
+        shr     bx,8
+        cmp     bx,230                  ; stay below the screen, never wrap
+        jbe     .t
+        cmp     word [MarioVY],0
+        jl      .t
+        mov     word [MarioY],230*256
+.t:     call    UpdateEffects
+        call    RenderWorld
+        call    FlipFrame
+        dec     word [DeathTimer]
+        jnz     .out
+        dec     byte [Lives]            ; Section 5.8 step 3
+        jz      .over
+        mov     word [LifeTimer],60     ; about 2 s
+        mov     byte [GameState],ST_LIFELOST
+        jmp     .out
+.over:  mov     byte [GameState],ST_GAMEOVER
+.out:   popa
+        ret
+
+; ------------------------------------------------------------ LIFE LOST (4)
+HandleLifeLost:
+        pusha
+        call    FlushKeys
+        push    word 0
+        push    word 0
+        push    word SCREEN_W
+        push    word SCREEN_H
+        push    word COL_BLACK
+        call    FillRect
+        xor     bx,bx
+        mov     bl,[CurLevel]
+        shl     bx,1
+        mov     bx,[WorldBigTbl+bx]     ; "WORLD 1-1" or "WORLD 1-2"
+        push    word 60
+        push    bx
+        push    word COL_WHITE
+        push    word 3
+        call    DrawCentered
+        push    word 112
+        push    word 104
+        push    word SprMarioSmallStand
+        push    word 16
+        push    word 0
+        call    DrawSprite
+        push    word 152
+        push    word 108
+        push    word 'x'
+        push    word COL_WHITE
+        push    word 2
+        call    DrawChar
+        xor     ax,ax
+        mov     al,[Lives]
+        push    word 176
+        push    word 108
+        push    word 0
+        push    ax
+        push    word 0
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 150
+        push    word StrLivesLeft
+        push    word COL_YELLOW
+        push    word 2
+        call    DrawCentered
+        call    FlipFrame
+        dec     word [LifeTimer]
+        jnz     .out
+        call    ResetLevel              ; restart the level (score and coins kept)
+        mov     byte [GameState],ST_PLAYING
+.out:   popa
+        ret
+
+; ------------------------------------------------------------ WIN SEQUENCE (5)
+HandleWinSeq:
+        pusha
+        call    FlushKeys
+        cmp     byte [WinPhase],0
+        jne     .walk
+        ; phase 0: slide down the pole, 3 px per frame, to the base block
+        call    MarioHeight
+        mov     bx,[MarioY]
+        shr     bx,8
+        add     bx,3
+        mov     cx,9*16
+        sub     cx,ax                   ; top when the feet touch the base block
+        cmp     bx,cx
+        jb      .slide
+        mov     bx,cx
+        mov     byte [WinPhase],1
+        mov     word [WinTimer],0
+.slide: shl     bx,8
+        mov     [MarioY],bx
+        jmp     .draw
+.walk:  ; phase 1: hop down and walk to the castle door for about 1 second
+        cmp     word [WinTimer],0
+        jne     .w2
+        call    MarioHeight
+        mov     bx,GROUND_TOP_Y
+        sub     bx,ax
+        shl     bx,8
+        mov     [MarioY],bx
+        mov     word [MarioXPix],POLE_X+16
+.w2:    add     word [MarioXPix],1
+        mov     byte [Pose],1
+        test    byte [TickCount],4
+        jz      .w3
+        mov     byte [Pose],0
+.w3:    cmp     word [MarioXPix],POLE_X+38
+        jb      .nh
+        mov     byte [HideMario],1      ; he went through the castle door
+.nh:    inc     word [WinTimer]
+        cmp     word [WinTimer],40
+        jb      .draw
+        mov     byte [HideMario],1
+        mov     ax,[Time]               ; Section 5.11 step 4: time bonus
+        mov     bx,ax
+        mov     cx,50
+        mul     cx
+        mov     [BonusPts],ax
+        mov     ax,[ScoreLo]
+        mov     [ScoreBefore],ax
+        mov     ax,[ScoreHi]
+        mov     [ScoreBeforeH],ax
+        push    word [BonusPts]
+        call    AddScore
+        mov     byte [GameState],ST_LEVELCOMP
+.draw:  call    UpdateEffects
+        call    RenderWorld
+        call    FlipFrame
+        popa
+        ret
+
+; ------------------------------------------------------------ LEVEL COMPLETE (6)
+HandleLevelComp:
+        pusha
+.keys:  call    GetKey
+        test    al,al
+        jz      .draw
+        cmp     al,SC_ENTER
+        jne     .keys
+        cmp     byte [CurLevel],LAST_LEVEL
+        jae     .title
+        inc     byte [CurLevel]         ; next level: score, coins and lives are kept
+        call    LoadLevel
+        mov     word [LifeTimer],60     ; "WORLD 1-2" card, then ResetLevel + play
+        mov     byte [GameState],ST_LIFELOST
+        call    FlushKeys
+        jmp     .out
+.title: mov     byte [GameState],ST_TITLE
+        call    FlushKeys
+        jmp     .out
+.draw:  push    word 0
+        push    word 0
+        push    word SCREEN_W
+        push    word SCREEN_H
+        push    word COL_BLACK
+        call    FillRect
+        push    word 32
+        push    word 24
+        push    word 256
+        push    word 152
+        push    word COL_YELLOW
+        call    FillRect
+        push    word 35
+        push    word 27
+        push    word 250
+        push    word 146
+        push    word COL_BLUE
+        call    FillRect
+        xor     bx,bx
+        mov     bl,[CurLevel]
+        shl     bx,1
+        mov     bx,[LevelCompTbl+bx]    ; "LEVEL COMPLETE!" / "GAME COMPLETE!"
+        push    word 36
+        push    bx
+        push    word COL_YELLOW
+        push    word 2
+        call    DrawCentered
+        push    word 64
+        push    word 68
+        push    word StrScoreLbl
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 168
+        push    word 68
+        push    word [ScoreBeforeH]
+        push    word [ScoreBefore]
+        push    word 6
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 64
+        push    word 84
+        push    word StrCoinsLbl
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 168
+        push    word 84
+        push    word 'x'
+        push    word COL_WHITE
+        push    word 1
+        call    DrawChar
+        xor     ax,ax
+        mov     al,[Coins]
+        push    word 176
+        push    word 84
+        push    word 0
+        push    ax
+        push    word 0
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 64
+        push    word 100
+        push    word StrTimeLeft
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 168
+        push    word 100
+        push    word 0
+        push    word [Time]
+        push    word 0
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 208
+        push    word 100
+        push    word StrX50
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 64
+        push    word 116
+        push    word StrBonus
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 168
+        push    word 116
+        push    word 0
+        push    word [BonusPts]
+        push    word 0
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 64
+        push    word 136
+        push    word StrFinal
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 168
+        push    word 136
+        push    word [ScoreHi]
+        push    word [ScoreLo]
+        push    word 6
+        push    word COL_YELLOW
+        call    DrawNumber
+        push    word 160
+        push    word StrPressEnter
+        push    word COL_LGREEN
+        push    word 1
+        call    DrawCentered
+        call    FlipFrame
+.out:   popa
+        ret
+
+; ------------------------------------------------------------ GAME OVER (7)
+HandleGameOver:
+        pusha
+.keys:  call    GetKey
+        test    al,al
+        jz      .draw
+        cmp     al,SC_ENTER
+        jne     .keys
+        mov     byte [GameState],ST_TITLE
+        call    FlushKeys
+        jmp     .out
+.draw:  push    word 0
+        push    word 0
+        push    word SCREEN_W
+        push    word SCREEN_H
+        push    word COL_BLACK
+        call    FillRect
+        push    word 32
+        push    word 24
+        push    word 256
+        push    word 152
+        push    word COL_RED
+        call    FillRect
+        push    word 35
+        push    word 27
+        push    word 250
+        push    word 146
+        push    word COL_BLACK
+        call    FillRect
+        push    word 56
+        push    word StrGameOver
+        push    word COL_RED
+        push    word 3
+        call    DrawCentered
+        push    word 100
+        push    word 92
+        push    word StrFinalScore
+        push    word COL_WHITE
+        push    word 1
+        call    DrawString
+        push    word 204
+        push    word 92
+        push    word [ScoreHi]
+        push    word [ScoreLo]
+        push    word 6
+        push    word COL_WHITE
+        call    DrawNumber
+        push    word 100
+        push    word 112
+        push    word StrCoinsC
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        xor     ax,ax
+        mov     al,[Coins]
+        push    word 148
+        push    word 112
+        push    word 0
+        push    ax
+        push    word 0
+        push    word COL_YELLOW
+        call    DrawNumber
+        push    word 180
+        push    word 112
+        push    word StrTimeC
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        push    word 228
+        push    word 112
+        push    word 0
+        push    word [Time]
+        push    word 3
+        push    word COL_YELLOW
+        call    DrawNumber
+        push    word 146
+        push    word StrPressTitle
+        push    word COL_LGREEN
+        push    word 1
+        call    DrawCentered
+        call    FlipFrame
+.out:   popa
+        ret
