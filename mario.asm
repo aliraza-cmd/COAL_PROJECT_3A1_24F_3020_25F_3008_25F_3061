@@ -1418,3 +1418,218 @@ DrawPine:
         pop     ax
         pop     bp
         ret     2
+
+
+; =============================================================================
+;  MODULE 13 helpers : SCORE, COINS, LIVES, EFFECTS
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; AddScore(points)
+; Purpose : the one scoring procedure.  32-bit score kept in two words and
+;           added with ADD/ADC; clamped to 999,999 (0F423Fh).
+; Changes : none
+; -----------------------------------------------------------------------------
+AddScore:
+        push    bp
+        mov     bp,sp
+        push    ax
+        mov     ax,[bp+4]
+        add     [ScoreLo],ax
+        adc     word [ScoreHi],0
+        cmp     word [ScoreHi],0Fh
+        jb      .ok
+        ja      .clamp
+        cmp     word [ScoreLo],423Fh
+        jbe     .ok
+.clamp: mov     word [ScoreHi],0Fh
+        mov     word [ScoreLo],423Fh
+.ok:    pop     ax
+        pop     bp
+        ret     2
+
+; AddLife : lives + 1 (never above 99).           Changes: none
+AddLife:
+        cmp     byte [Lives],99
+        jae     .r
+        inc     byte [Lives]
+.r:     ret
+
+; AddCoin : coins + 1; the 100th coin gives a life and resets the counter.
+AddCoin:
+        inc     byte [Coins]
+        cmp     byte [Coins],100
+        jb      .r
+        mov     byte [Coins],0
+        call    AddLife
+.r:     ret
+
+; -----------------------------------------------------------------------------
+; SpawnEffect(kind, x, y, value)
+; Purpose : starts a short visual effect (kind 1 = score pop-up showing value,
+;           kind 2 = coin hopping out of a block).  x, y are world pixels.
+; Changes : none
+; -----------------------------------------------------------------------------
+SpawnEffect:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     si,EffTbl
+        mov     cx,EFF_MAX
+.f:     cmp     byte [si],0
+        je      .got
+        add     si,EFF_SIZE
+        loop    .f
+        jmp     .out
+.got:   mov     ax,[bp+10]
+        mov     [si],al                 ; kind
+        mov     byte [si+1],30          ; timer
+        cmp     al,2
+        jne     .t
+        mov     byte [si+1],14
+.t:     mov     ax,[bp+8]
+        mov     [si+2],ax               ; x
+        mov     ax,[bp+6]
+        mov     [si+4],ax               ; y
+        mov     ax,[bp+4]
+        mov     [si+6],ax               ; value
+.out:   popa
+        pop     bp
+        ret     8
+
+; UpdateEffects : moves every effect upwards and removes finished ones.
+UpdateEffects:
+        pusha
+        mov     si,EffTbl
+        mov     cx,EFF_MAX
+.l:     mov     al,[si]
+        test    al,al
+        jz      .n
+        mov     bx,1                    ; pop-up rises 1 px per frame
+        cmp     al,2
+        jne     .mv
+        mov     bx,3                    ; coin hops faster
+.mv:    sub     [si+4],bx
+        dec     byte [si+1]
+        jnz     .n
+        mov     byte [si],0
+.n:     add     si,EFF_SIZE
+        loop    .l
+        popa
+        ret
+
+; DrawEffects : draws pop-up numbers and hopping coins.
+DrawEffects:
+        pusha
+        mov     si,EffTbl
+        mov     cx,EFF_MAX
+.l:     mov     al,[si]
+        test    al,al
+        jz      .n
+        mov     bx,[si+2]
+        sub     bx,[CamX]               ; screen x
+        mov     dx,[si+4]               ; y
+        cmp     al,2
+        je      .coin
+        push    cx
+        push    bx
+        push    dx
+        push    word 0
+        push    word [si+6]
+        push    word 0
+        push    word COL_WHITE
+        call    DrawNumber
+        pop     cx
+        jmp     .n
+.coin:  push    cx
+        push    bx
+        push    dx
+        push    word SprCoin
+        push    word 16
+        push    word 0
+        call    DrawSprite
+        pop     cx
+.n:     add     si,EFF_SIZE
+        loop    .l
+        popa
+        ret
+
+
+; =============================================================================
+;  MODULE 6 : CAMERA AND SCROLLING (Section 5.3)
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; UpdateCamera
+; Purpose : follow Mario once screen_x passes 160, clamp to 0..640, never move
+;           left, keep Mario inside the level and behind the left screen edge.
+; Changes : none
+; -----------------------------------------------------------------------------
+UpdateCamera:
+        pusha
+        mov     ax,[MarioXPix]
+        sub     ax,[CamX]               ; 1. screen_x
+        cmp     ax,160                  ; 2. only follow past the middle
+        jle     .left
+        mov     ax,[MarioXPix]
+        sub     ax,160                  ;    new_camera
+        cmp     ax,CAM_MAX              ; 3. clamp at the end of the level
+        jle     .c1
+        mov     ax,CAM_MAX
+.c1:    cmp     ax,[CamX]               ; 4. never decrease
+        jle     .left
+        mov     [CamX],ax
+.left:  mov     ax,[MarioXPix]          ; 5. left wall = left screen edge
+        cmp     ax,[CamX]
+        jge     .right
+        mov     ax,[CamX]
+        mov     [MarioXPix],ax
+        mov     word [MarioXFr],0
+        mov     word [MarioVX],0
+.right: mov     ax,[MarioXPix]          ; right end of the level
+        cmp     ax,MARIO_MAXX
+        jle     .done
+        mov     word [MarioXPix],MARIO_MAXX
+        mov     word [MarioXFr],0
+        mov     word [MarioVX],0
+.done:  popa
+        ret
+
+; =============================================================================
+;  MODULE 9 : PLAYER MOVEMENT AND PHYSICS      MODULE 10 : COLLISION
+; =============================================================================
+
+; MarioHeight : AX = 16 (Small) or 32 (Super).      Changes: AX
+MarioHeight:
+        mov     ax,16
+        cmp     byte [Form],0
+        je      .r
+        mov     ax,32
+.r:     ret
+
+; -----------------------------------------------------------------------------
+; RectOverlap(ax0,ay0,ax1,ay1, bx0,by0,bx1,by1)
+; Purpose : AX = 1 when the two rectangles (end coordinates exclusive) overlap.
+; Changes : AX only
+; -----------------------------------------------------------------------------
+RectOverlap:
+        push    bp
+        mov     bp,sp
+        mov     ax,[bp+18]
+        cmp     ax,[bp+6]
+        jge     .no
+        mov     ax,[bp+10]
+        cmp     ax,[bp+14]
+        jge     .no
+        mov     ax,[bp+16]
+        cmp     ax,[bp+4]
+        jge     .no
+        mov     ax,[bp+8]
+        cmp     ax,[bp+12]
+        jge     .no
+        mov     ax,1
+        pop     bp
+        ret     16
+.no:    xor     ax,ax
+        pop     bp
+        ret     16
