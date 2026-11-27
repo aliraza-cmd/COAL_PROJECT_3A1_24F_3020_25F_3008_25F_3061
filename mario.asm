@@ -2634,3 +2634,90 @@ ResolveMario:
         loop    .l
 .out:   popa
         ret
+
+; -----------------------------------------------------------------------------
+; ScanMarioTiles(mode)
+; Purpose : looks at every tile covered by Mario's hit box.  mode 0: collect
+;           coin tiles (+200, coins +1).  mode 1: report the flag pole.
+; Outputs : AX = 1 (mode 1) when Mario overlaps a pole tile
+; -----------------------------------------------------------------------------
+ScanMarioTiles:
+        push    bp
+        mov     bp,sp
+        push    bx
+        push    cx
+        push    dx
+        push    si
+        push    di
+        call    MarioHeight
+        mov     si,ax
+        mov     ax,[MarioY]
+        shr     ax,8
+        mov     dx,ax
+        shr     ax,4
+        mov     di,ax                   ; first row
+        add     dx,si
+        dec     dx
+        shr     dx,4                    ; last row
+        mov     ax,[MarioXPix]
+        add     ax,2
+        shr     ax,4
+        mov     [TmpC0],ax              ; first column
+        mov     cx,[MarioXPix]
+        add     cx,13
+        shr     cx,4                    ; last column
+        mov     word [TmpFlag],0
+        cmp     dx,MAP_ROWS-1           ; FIX: keep the scan inside the map
+        jbe     .rok                    ;      (falling into a pit gave rows 12-13)
+        mov     dx,MAP_ROWS-1
+.rok:   cmp     cx,MAP_COLS-1
+        jbe     .cok
+        mov     cx,MAP_COLS-1
+.cok:   cmp     di,dx
+        ja      .fin                    ; no map row covered at all
+        mov     ax,[TmpC0]
+        cmp     ax,cx
+        ja      .fin                    ; no map column covered at all
+.r:     mov     si,[TmpC0]
+.c:     mov     bx,di
+        imul    bx,bx,MAP_COLS
+        add     bx,si
+        mov     al,[WorkMap+bx]
+        cmp     word [bp+4],0
+        jne     .fl
+        cmp     al,T_COIN
+        jne     .nx
+        push    si
+        push    di
+        push    word T_SKY
+        call    SetTile
+        call    AddCoin
+        push    word 200
+        call    AddScore
+        push    word 1
+        mov     ax,si
+        shl     ax,4
+        push    ax
+        mov     ax,di
+        shl     ax,4
+        push    ax
+        push    word 200
+        call    SpawnEffect
+        jmp     .nx
+.fl:    cmp     al,T_POLE
+        jne     .nx
+        mov     word [TmpFlag],1
+.nx:    inc     si
+        cmp     si,cx
+        jle     .c
+        inc     di
+        cmp     di,dx
+        jle     .r
+.fin:   mov     ax,[TmpFlag]
+        pop     di
+        pop     si
+        pop     dx
+        pop     cx
+        pop     bx
+        pop     bp
+        ret     2
