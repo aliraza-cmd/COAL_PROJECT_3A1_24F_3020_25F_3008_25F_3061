@@ -369,3 +369,140 @@ FillRect:
         pop     ax
         pop     bp
         ret     10
+
+ 
+; -----------------------------------------------------------------------------
+; ColorTestScreen
+; Purpose : Module 2 test screen: 16 swatches with their palette numbers.
+;           Shown with  MARIO.COM T  ; waits for a key, then returns.
+; -----------------------------------------------------------------------------
+ColorTestScreen:
+        pusha
+        mov     word [DrawSeg],VGA_SEG
+        xor     si,si                   ; colour number
+.sw:    mov     ax,si
+        and     ax,7
+        mov     bx,ax
+        shl     bx,5
+        add     bx,32                   ; x = 32 + (n mod 8)*32
+        mov     ax,si
+        shr     ax,3
+        mov     dx,ax
+        shl     dx,6
+        add     dx,50                   ; y = 50 + (n div 8)*64
+        push    bx
+        push    dx
+        push    word 28
+        push    word 28
+        push    si
+        call    FillRect
+        push    bx                      ; palette number under each swatch
+        add     dx,32
+        push    dx
+        push    word 0                  ; high word
+        push    si                      ; low word
+        push    word 0                  ; 0 = no leading zeros
+        push    word COL_WHITE
+        call    DrawNumber
+        inc     si
+        cmp     si,16
+        jb      .sw
+        push    word 40
+        push    word 20
+        push    word MsgTest
+        push    word COL_YELLOW
+        push    word 1
+        call    DrawString
+        xor     ax,ax
+        int     16h                     ; wait for any key (BIOS)
+        popa
+        ret
+
+; =============================================================================
+;  TEXT AND NUMBERS  (bitmap font from the BIOS ROM, drawn by our own code)
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; InitFont
+; Purpose : asks the BIOS (INT 10h AX=1130h BH=3) for the 8x8 ROM font and
+;           remembers its far pointer in FontSeg:FontOff.
+; Changes : none
+; -----------------------------------------------------------------------------
+InitFont:
+        pusha
+        push    es
+        mov     ax,1130h
+        mov     bh,03h
+        int     10h                     ; returns ES:BP
+        mov     [FontOff],bp
+        mov     [FontSeg],es
+        pop     es
+        popa
+        ret
+
+; -----------------------------------------------------------------------------
+; DrawBits8(x, y, address, colour, scale)
+; Purpose : draws an 8x8 1-bit bitmap found at DS:address (msb = leftmost).
+;           scale 1 writes pixels directly, bigger scales use FillRect.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawBits8:
+        push    bp
+        mov     bp,sp
+        pusha
+        push    es
+        mov     es,[DrawSeg]
+        mov     si,[bp+8]               ; bitmap address
+        xor     dx,dx                   ; row 0..7
+.row:   mov     al,[si]
+        inc     si
+        mov     cx,8                    ; column counter
+        xor     bx,bx                   ; column 0..7
+.col:   shl     al,1
+        jnc     .skip
+        push    ax
+        cmp     word [bp+4],1
+        jne     .big
+        ; scale 1: direct pixel
+        ; FIX: clip to the screen (unsigned compares also reject negatives);
+        ;      before, pop-ups / text near an edge wrote outside the buffer
+        mov     ax,[bp+10]              ; y
+        add     ax,dx
+        cmp     ax,SCREEN_H
+        jae     .done
+        mov     di,ax
+        shl     di,8
+        shl     ax,6
+        add     di,ax                   ; di = y*320
+        mov     ax,[bp+12]              ; x
+        add     ax,bx
+        cmp     ax,SCREEN_W
+        jae     .done
+        add     di,ax
+        mov     al,[bp+6]
+        mov     [es:di],al
+        jmp     .done
+.big:   mov     ax,[bp+4]               ; scale
+        push    ax
+        imul    ax,bx
+        add     ax,[bp+12]
+        push    ax                      ; x
+        mov     ax,[bp+4]
+        imul    ax,dx
+        add     ax,[bp+10]
+        push    ax                      ; y
+        push    word [bp+4]             ; w
+        push    word [bp+4]             ; h
+        push    word [bp+6]             ; colour
+        call    FillRect
+        pop     ax
+.done:  pop     ax
+.skip:  inc     bx
+        loop    .col
+        inc     dx
+        cmp     dx,8
+        jb      .row
+        pop     es
+        popa
+        pop     bp
+        ret     10
