@@ -1207,3 +1207,214 @@ DrawBackground:
 .done:  popa
         ret
 
+
+; -----------------------------------------------------------------------------
+; DrawSun
+; Purpose : theme addition - a yellow sun with an orange glow (day sky only),
+;           fixed on the screen like the moon of level 2.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawSun:
+        pusha
+        mov     si,SunRects
+        mov     cx,5
+.r:     push    word [si]               ; x
+        push    word [si+2]             ; y
+        push    word [si+4]             ; w
+        push    word [si+6]             ; h
+        push    word [si+8]             ; colour
+        call    FillRect
+        add     si,10
+        loop    .r
+        popa
+        ret
+
+; -----------------------------------------------------------------------------
+; DrawNightScenery
+; Purpose : level 2 backdrop.  Twinkling stars (slow parallax), a crescent moon
+;           (fixed on the screen), far hills (quarter speed) and pine trees
+;           (scroll with the world).  Everything is made of FillRect/PutPixel.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawNightScenery:
+        pusha
+        ; ---- stars: x moves at 1/8 of the camera speed and wraps around
+        xor     si,si
+.star:  mov     cx,[StarX+si]
+        mov     dx,[CamX]
+        shr     dx,3
+        sub     cx,dx
+        jge     .sx
+        add     cx,SCREEN_W
+.sx:    mov     dx,[StarY+si]
+        mov     bx,[TickCount]
+        shr     bx,4                    ; twinkle: colour depends on time and index
+        add     bx,si
+        and     bx,6
+        shr     bx,1
+        xor     ax,ax
+        mov     al,[StarCol+bx]
+        test    si,6
+        jnz     .small
+        push    cx                      ; every 4th star is a bigger 2x2 one
+        push    dx
+        push    word 2
+        push    word 2
+        push    ax
+        call    FillRect
+        jmp     .ns
+.small: push    cx
+        push    dx
+        push    ax
+        call    PutPixel
+.ns:    add     si,2
+        cmp     si,2*NSTARS
+        jb      .star
+        ; ---- far hills
+        xor     si,si
+.hill:  mov     ax,[HillX+si]
+        mov     dx,[CamX]
+        shr     dx,2
+        sub     ax,dx
+        cmp     ax,-96
+        jle     .nh
+        cmp     ax,SCREEN_W
+        jge     .nh
+        push    ax
+        call    DrawHill
+.nh:    add     si,2
+        cmp     si,2*NHILLS
+        jb      .hill
+        ; ---- crescent moon: one white row per line, the right part cut away
+        xor     si,si
+.moon:  xor     ax,ax
+        mov     al,[MoonHW+si]          ; half width of this row of the disc
+        mov     bx,MOON_CX
+        sub     bx,ax                   ; left end
+        mov     dx,MOON_CX
+        add     dx,ax                   ; right end
+        mov     di,si
+        add     di,3                    ; second disc: 7 right, 3 up
+        cmp     di,25
+        jmp     .nocut                  ; autumn: full low sun, no crescent cut-out
+        xor     ax,ax
+        mov     al,[MoonHW+di]
+        mov     cx,MOON_CX+7
+        sub     cx,ax
+        dec     cx                      ; last pixel before the cut-out disc
+        cmp     cx,dx
+        jge     .nocut
+        mov     dx,cx
+.nocut: cmp     dx,bx
+        jl      .nm
+        push    bx                      ; x
+        mov     ax,MOON_Y
+        add     ax,si
+        push    ax                      ; y
+        mov     ax,dx
+        sub     ax,bx
+        inc     ax
+        push    ax                      ; width
+        push    word 1
+        push    word COL_YELLOW
+        call    FillRect
+.nm:    inc     si
+        cmp     si,25
+        jb      .moon
+        ; ---- pine trees (world coordinates)
+        xor     si,si
+.tree:  mov     ax,[TreeX+si]
+        sub     ax,[CamX]
+        cmp     ax,-24
+        jle     .nt
+        cmp     ax,SCREEN_W
+        jge     .nt
+        push    ax
+        call    DrawPine
+.nt:    add     si,2
+        cmp     si,2*NTREES
+        jb      .tree
+        popa
+        ret
+
+; DrawHill(x) : dark rounded hill, 96 px wide, standing on the ground line.
+DrawHill:
+        push    bp
+        mov     bp,sp
+        push    ax
+        mov     ax,[bp+4]
+        push    ax
+        push    word 150
+        push    word 96
+        push    word 10
+        push    word COL_DGREEN
+        call    FillRect
+        add     ax,10
+        push    ax
+        push    word 140
+        push    word 76
+        push    word 10
+        push    word COL_DGREEN
+        call    FillRect
+        add     ax,14
+        push    ax
+        push    word 130
+        push    word 48
+        push    word 10
+        push    word COL_DGREEN
+        call    FillRect
+        add     ax,14
+        push    ax
+        push    word 122
+        push    word 20
+        push    word 8
+        push    word COL_DGREEN
+        call    FillRect
+        pop     ax
+        pop     bp
+        ret     2
+
+; DrawPine(x) : small pine tree (4 stacked layers and a trunk), 18 px wide.
+DrawPine:
+        push    bp
+        mov     bp,sp
+        push    ax
+        mov     ax,[bp+4]
+        add     ax,8
+        push    ax
+        push    word 150
+        push    word 2
+        push    word 10
+        push    word COL_DARK
+        call    FillRect
+        sub     ax,7                    ; layer 1: x+1, 16 wide
+        push    ax
+        push    word 142
+        push    word 16
+        push    word 8
+        push    word COL_GREEN
+        call    FillRect
+        add     ax,2                    ; layer 2: x+3, 12 wide
+        push    ax
+        push    word 134
+        push    word 12
+        push    word 8
+        push    word COL_GREEN
+        call    FillRect
+        add     ax,2                    ; layer 3: x+5, 8 wide
+        push    ax
+        push    word 126
+        push    word 8
+        push    word 8
+        push    word COL_GREEN
+        call    FillRect
+        add     ax,2                    ; layer 4 (tip): x+7, 4 wide
+        push    ax
+        push    word 118
+        push    word 4
+        push    word 8
+        push    word COL_GREEN
+        call    FillRect
+        pop     ax
+        pop     bp
+        ret     2
