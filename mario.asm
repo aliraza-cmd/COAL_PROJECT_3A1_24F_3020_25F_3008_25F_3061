@@ -1633,3 +1633,276 @@ RectOverlap:
 .no:    xor     ax,ax
         pop     bp
         ret     16
+
+
+        
+; -----------------------------------------------------------------------------
+; UpdateMario
+; Purpose : Section 5.2 : acceleration, friction, run, jump (ground only),
+;           variable jump height, gravity, then tile collision one axis at a
+;           time (horizontal first, vertical second).
+; Changes : none
+; -----------------------------------------------------------------------------
+UpdateMario:
+        pusha
+        call    MarioHeight
+        mov     si,ax                   ; si = Mario height for this frame
+        mov     bx,[MarioY]
+        shr     bx,8
+        add     bx,si
+        mov     [PrevFeet],bx           ; feet position before moving
+
+        ; ---------------------------------------------- horizontal speed
+        mov     ax,[MarioVX]
+        mov     bx,WALK_MAX
+        cmp     byte [KeyTbl+SC_LSHIFT],0
+        je      .nr
+        mov     bx,RUN_MAX              ; Left Shift = run
+.nr:    mov     cl,[KeyTbl+SC_LEFT]
+        mov     ch,[KeyTbl+SC_RIGHT]
+        cmp     cl,ch
+        je      .friction               ; none or both keys
+        test    cl,cl
+        jnz     .left
+.right: mov     byte [Facing],0
+        cmp     ax,bx
+        jg      .r_over
+        mov     cx,ACCEL
+        test    ax,ax
+        jge     .r_a
+        mov     cx,ACCEL*2              ; braking is faster
+.r_a:   add     ax,cx
+        cmp     ax,bx
+        jle     .store
+        mov     ax,bx
+        jmp     .store
+.r_over:sub     ax,FRICTION
+        cmp     ax,bx
+        jge     .store
+        mov     ax,bx
+        jmp     .store
+.left:  mov     byte [Facing],1
+        mov     dx,bx
+        neg     dx                      ; dx = -max
+        cmp     ax,dx
+        jl      .l_over
+        mov     cx,ACCEL
+        test    ax,ax
+        jle     .l_a
+        mov     cx,ACCEL*2
+.l_a:   sub     ax,cx
+        cmp     ax,dx
+        jge     .store
+        mov     ax,dx
+        jmp     .store
+.l_over:add     ax,FRICTION
+        cmp     ax,dx
+        jle     .store
+        mov     ax,dx
+        jmp     .store
+.friction:
+        test    ax,ax
+        jz      .store
+        js      .fneg
+        sub     ax,FRICTION
+        jns     .store
+        xor     ax,ax
+        jmp     .store
+.fneg:  add     ax,FRICTION
+        js      .store
+        xor     ax,ax
+.store: mov     [MarioVX],ax
+
+        ; ---------------------------------------------- jump and gravity
+        cmp     byte [JumpBuf],0
+        je      .nojump
+        dec     byte [JumpBuf]
+        cmp     byte [OnGround],0
+        je      .nojump                 ; no double jump
+        mov     word [MarioVY],JUMP_V
+        mov     byte [OnGround],0
+        mov     byte [JumpBuf],0
+.nojump:
+        mov     ax,[MarioVY]
+        test    ax,ax
+        jge     .grav
+        cmp     byte [KeyTbl+SC_SPACE],0
+        jne     .grav                   ; Space still held: full jump
+        cmp     ax,JUMP_CUT
+        jge     .grav
+        mov     word [MarioVY],JUMP_CUT ; released early: cut the jump short
+.grav:  mov     ax,[MarioVY]
+        add     ax,GRAVITY
+        cmp     ax,FALL_MAX
+        jle     .gs
+        mov     ax,FALL_MAX
+.gs:    mov     [MarioVY],ax
+
+        ; ---------------------------------------------- move horizontally
+        mov     ax,[MarioXFr]
+        add     ax,[MarioVX]
+        mov     dx,ax
+        sar     dx,8                    ; whole pixels moved (signed)
+        and     ax,0FFh
+        mov     [MarioXFr],ax
+        add     [MarioXPix],dx
+        mov     ax,[MarioVX]
+        test    ax,ax
+        jz      .vert
+        mov     bx,[MarioXPix]
+        js      .lside
+        add     bx,13                   ; right edge of the hit box
+        jmp     .hscan
+.lside: add     bx,2                    ; left edge of the hit box
+.hscan: mov     ax,[MarioY]
+        shr     ax,8
+        mov     di,ax
+        shr     di,4                    ; first row covered
+        add     ax,si
+        dec     ax
+        shr     ax,4
+        mov     dx,ax                   ; last row covered
+.hrow:  mov     ax,di
+        shl     ax,4
+        push    bx
+        push    ax
+        call    IsSolid
+        test    ax,ax
+        jnz     .hhit
+        inc     di
+        cmp     di,dx
+        jle     .hrow
+        jmp     .vert
+.hhit:  mov     ax,bx
+        sar     ax,4                    ; column of the wall   FIX: signed (x may be < 0)
+        cmp     word [MarioVX],0
+        jl      .hl
+        shl     ax,4
+        sub     ax,14                   ; stand against the wall (right side)
+        jmp     .hset
+.hl:    inc     ax
+        shl     ax,4
+        sub     ax,2
+.hset:  mov     [MarioXPix],ax
+        mov     word [MarioXFr],0
+        mov     word [MarioVX],0
+
+        ; ---------------------------------------------- move vertically
+.vert:  mov     ax,[MarioY]
+        mov     dx,[MarioVY]
+        test    dx,dx
+        js      .vup
+        add     ax,dx
+        jnc     .vset
+        mov     ax,0FF00h               ; FIX: Y never wraps past the bottom ...
+        jmp     .vset
+.vup:   add     ax,dx
+        jc      .vset                   ; carry = result still >= 0
+        xor     ax,ax                   ; FIX: ... or above the top of the screen
+        mov     word [MarioVY],0
+.vset:  mov     [MarioY],ax
+        mov     ax,[MarioVY]
+        test    ax,ax
+        jz      near .probe
+        js      .rising
+        mov     bx,[MarioY]             ; falling: look at the feet
+        shr     bx,8
+        add     bx,si
+        dec     bx                      ; y of the lowest pixel row
+        mov     di,[MarioXPix]
+        add     di,2
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jnz     .land
+        mov     di,[MarioXPix]
+        add     di,13
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jz      .probe
+.land:  shr     bx,4
+        shl     bx,4                    ; top of the tile row under the feet
+        sub     bx,si                   ; Mario's top = tile top - height
+        shl     bx,8
+        mov     [MarioY],bx
+        mov     word [MarioVY],0
+        jmp     .probe
+.rising:mov     bx,[MarioY]             ; rising: look at the head
+        shr     bx,8
+        mov     di,[MarioXPix]
+        add     di,8                    ; centre of the head first (Section 5.9)
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jnz     .headhit
+        mov     di,[MarioXPix]
+        add     di,2
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jnz     .headhit
+        mov     di,[MarioXPix]
+        add     di,13
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jz      .probe
+.headhit:
+        mov     cx,di
+        shr     cx,4                    ; column of the block that was hit
+        mov     ax,bx
+        shr     ax,4                    ; its row
+        push    cx
+        push    ax
+        call    TriggerBlock            ; Module 12
+        mov     ax,bx
+        shr     ax,4
+        inc     ax
+        shl     ax,4                    ; just below the block
+        shl     ax,8
+        mov     [MarioY],ax
+        mov     word [MarioVY],0
+
+        ; ---------------------------------------------- on-ground probe
+.probe: mov     byte [OnGround],0
+        cmp     word [MarioVY],0
+        jl      .pose
+        mov     bx,[MarioY]
+        shr     bx,8
+        add     bx,si                   ; pixel row just below the feet
+        mov     di,[MarioXPix]
+        add     di,2
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jnz     .gnd
+        mov     di,[MarioXPix]
+        add     di,13
+        push    di
+        push    bx
+        call    IsSolid
+        test    ax,ax
+        jz      .pose
+.gnd:   mov     byte [OnGround],1
+        mov     byte [StompChain],0     ; landing resets the stomp chain
+
+        ; ---------------------------------------------- pose
+.pose:  mov     byte [Pose],2           ; jumping sprite in the air
+        cmp     byte [OnGround],0
+        je      .done
+        mov     byte [Pose],0           ; standing
+        cmp     word [MarioVX],0
+        je      .done
+        mov     byte [Pose],1           ; running (alternates with standing)
+        test    byte [TickCount],4
+        jz      .done
+        mov     byte [Pose],0
+.done:  popa
+        ret
