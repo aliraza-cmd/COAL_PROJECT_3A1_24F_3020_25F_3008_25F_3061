@@ -604,3 +604,606 @@ DrawCentered:
         popa
         pop     bp
         ret     8
+
+; -----------------------------------------------------------------------------
+; Div32By10
+; Purpose : divides the 32-bit number DX:AX by 10 using two 16-bit DIVs.
+; Inputs  : DX:AX        Outputs : DX:AX = quotient, CX = remainder
+; Changes : AX, CX, DX (BX preserved)
+; -----------------------------------------------------------------------------
+Div32By10:
+        push    bx
+        mov     bx,ax                   ; keep low word
+        mov     ax,dx
+        xor     dx,dx
+        mov     cx,10
+        div     cx                      ; high word / 10
+        xchg    ax,bx                   ; bx = high quotient, ax = low word
+        div     cx                      ; (rem:low) / 10
+        mov     cx,dx                   ; remainder
+        mov     dx,bx                   ; quotient high
+        pop     bx
+        ret
+
+; -----------------------------------------------------------------------------
+; DrawNumber(x, y, high, low, digits, colour)
+; Purpose : prints a 32-bit number in decimal.  digits > 0 -> zero padded to
+;           that many digits, digits = 0 -> no leading zeros.  Remainders of
+;           repeated division by 10 are pushed, then popped in reverse order.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawNumber:
+        push    bp
+        mov     bp,sp
+        pusha
+        mov     dx,[bp+10]
+        mov     ax,[bp+8]
+        xor     si,si                   ; digit counter
+.div:   call    Div32By10
+        push    cx                      ; remainder
+        inc     si
+        mov     bx,[bp+6]
+        test    bx,bx
+        jz      .auto
+        cmp     si,bx
+        jb      .div
+        jmp     .print
+.auto:  mov     bx,ax
+        or      bx,dx
+        jnz     .div
+.print: mov     bx,[bp+14]              ; x
+.pl:    pop     ax
+        add     al,'0'
+        push    bx
+        push    word [bp+12]
+        push    ax
+        push    word [bp+4]
+        push    word 1
+        call    DrawChar
+        add     bx,8
+        dec     si
+        jnz     .pl
+        popa
+        pop     bp
+        ret     12
+
+; =============================================================================
+;  SPRITES  (Module 4)
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; DrawSprite(x, y, address, height, flags)
+; Purpose : draws a 16-wide sprite (colour 0 = transparent) into the draw
+;           segment.  flags bit 0 = mirror horizontally.  The sprite may be
+;           partly or completely off screen on any side (clipped per pixel).
+;           A fast path handles the common unmirrored, fully visible case.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawSprite:
+        push    bp
+        mov     bp,sp
+        pusha
+        push    es
+        mov     es,[DrawSeg]
+        mov     si,[bp+8]               ; sprite data
+        cmp     word [bp+6],0           ; FIX: height 0 / negative = nothing to draw
+        jle     near .out
+        cld
+        ; ---- try the fast path: no mirror, fully inside the screen
+        test    word [bp+4],1
+        jnz     .slow
+        mov     ax,[bp+12]
+        cmp     ax,0
+        jl      .slow
+        cmp     ax,SCREEN_W-16
+        jg      .slow
+        mov     bx,[bp+10]
+        cmp     bx,0
+        jl      .slow
+        mov     cx,bx
+        add     cx,[bp+6]
+        cmp     cx,SCREEN_H
+        jg      .slow
+        mov     di,bx                   ; di = y*320 + x
+        shl     di,8
+        shl     bx,6
+        add     di,bx
+        add     di,ax
+        mov     dx,[bp+6]               ; rows
+.frow:  mov     cx,16
+.fpix:  lodsb
+        test    al,al
+        jz      .fz
+        mov     [es:di],al
+.fz:    inc     di
+        loop    .fpix
+        add     di,SCREEN_W-16
+        dec     dx
+        jnz     .frow
+        jmp     .out
+        ; ---- general path with clipping and mirroring
+.slow:  xor     dx,dx                   ; row counter
+.row:   mov     ax,[bp+10]
+        add     ax,dx                   ; screen y of this row
+        cmp     ax,0
+        jl      .nextrow
+        cmp     ax,SCREEN_H
+        jge     .nextrow
+        mov     di,ax
+        shl     di,8
+        shl     ax,6
+        add     di,ax                   ; di = y*320
+        xor     bx,bx                   ; column
+.col:   mov     cx,[bp+12]
+        add     cx,bx                   ; screen x
+        cmp     cx,0
+        jl      .nextcol
+        cmp     cx,SCREEN_W
+        jge     .nextcol
+        mov     ax,bx
+        test    word [bp+4],1
+        jz      .nf
+        mov     ax,15
+        sub     ax,bx
+.nf:    push    bx
+        mov     bx,ax
+        mov     al,[si+bx]
+        pop     bx
+        test    al,al
+        jz      .nextcol
+        push    di
+        add     di,cx
+        mov     [es:di],al
+        pop     di
+.nextcol:
+        inc     bx
+        cmp     bx,16
+        jb      .col
+.nextrow:
+        add     si,16
+        inc     dx
+        cmp     dx,[bp+6]
+        jb      .row
+.out:   pop     es
+        popa
+        pop     bp
+        ret     10
+
+; -----------------------------------------------------------------------------
+; DrawTileOpaque(x, y, address)
+; Purpose : fast copy of a 16x16 tile that has no transparent pixels, using
+;           REP MOVSW per row.  Falls back to DrawSprite if the tile is not
+;           completely inside the screen.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawTileOpaque:
+        push    bp
+        mov     bp,sp
+        pusha
+        push    es
+        mov     ax,[bp+8]               ; x
+        mov     bx,[bp+6]               ; y
+        cmp     ax,0
+        jl      .clip
+        cmp     ax,SCREEN_W-16
+        jg      .clip
+        cmp     bx,0                    ; FIX: y must be fully inside as well
+        jl      .clip
+        cmp     bx,SCREEN_H-16
+        jg      .clip
+        mov     es,[DrawSeg]
+        mov     si,[bp+4]
+        mov     di,bx
+        shl     di,8
+        shl     bx,6
+        add     di,bx
+        add     di,ax
+        mov     dx,16
+        cld
+.row:   mov     cx,8
+        rep     movsw
+        add     di,SCREEN_W-16
+        dec     dx
+        jnz     .row
+        jmp     .out
+.clip:  push    ax
+        push    bx
+        push    word [bp+4]
+        push    word 16
+        push    word 0
+        call    DrawSprite
+.out:   pop     es
+        popa
+        pop     bp
+        ret     6
+
+; =============================================================================
+;  MODULE 3 : LEVEL MAP AND TILE DRAWING
+; =============================================================================
+
+; -----------------------------------------------------------------------------
+; InitLevel
+; Purpose : converts the readable character map (level.inc) into the original
+;           byte table of tile codes (OrigMap), then copies it to WorkMap.
+; Changes : none
+; -----------------------------------------------------------------------------
+InitLevel:
+        pusha
+        push    es
+        mov     ax,cs
+        mov     es,ax
+        xor     bx,bx
+        mov     bl,[CurLevel]
+        shl     bx,1
+        mov     si,[LevelTextTbl+bx]    ; character map of the current level
+        mov     di,OrigMap
+        mov     cx,MAP_SIZE
+        cld
+.ch:    lodsb
+        xor     bx,bx
+.find:  cmp     al,[TileChars+bx]       ; based-indexed look-up of the code
+        je      .found
+        inc     bx
+        cmp     bx,13
+        jb      .find
+        xor     bx,bx                   ; unknown character = sky
+.found: mov     [di],bl
+        inc     di
+        loop    .ch
+        pop     es
+        popa
+        call    ResetMap
+        ret
+
+; -----------------------------------------------------------------------------
+; LoadLevel
+; Purpose : builds the map of level CurLevel and loads that level's palette
+;           (level 1 = day colours, level 2 = night colours).
+; Changes : none
+; -----------------------------------------------------------------------------
+LoadLevel:
+        call    InitLevel
+        call    SetPalette
+        ret
+
+; -----------------------------------------------------------------------------
+; ResetMap
+; Purpose : restores the working map from the untouched original with one
+;           block-move instruction (REP MOVSW).
+; Changes : none
+; -----------------------------------------------------------------------------
+ResetMap:
+        pusha
+        push    es
+        mov     ax,cs
+        mov     es,ax
+        mov     si,OrigMap
+        mov     di,WorkMap
+        mov     cx,MAP_SIZE/2
+        cld
+        rep     movsw
+        pop     es
+        popa
+        ret
+
+; -----------------------------------------------------------------------------
+; GetTile(px, py)
+; Purpose : converts a world pixel position to the tile code stored there.
+; Outputs : AX = tile code.  Outside the level to the left/right the result is
+;           "ground" (an invisible wall); above or below the map it is sky.
+; Changes : AX only
+; -----------------------------------------------------------------------------
+GetTile:
+        push    bp
+        mov     bp,sp
+        push    bx
+        mov     ax,[bp+6]               ; px
+        cmp     ax,0
+        jl      .wall
+        cmp     ax,LEVEL_W
+        jge     .wall
+        mov     bx,[bp+4]               ; py
+        cmp     bx,0
+        jl      .sky
+        cmp     bx,MAP_ROWS*TILE-0      ; rows 0..11 = pixels 0..191
+        jge     .sky
+        shr     ax,4                    ; column
+        shr     bx,4                    ; row
+        imul    bx,bx,MAP_COLS
+        add     bx,ax
+        xor     ax,ax
+        mov     al,[WorkMap+bx]
+        jmp     .out
+.wall:  mov     ax,T_GROUND
+        jmp     .out
+.sky:   xor     ax,ax
+.out:   pop     bx
+        pop     bp
+        ret     4
+
+; -----------------------------------------------------------------------------
+; IsSolid(px, py)
+; Purpose : AX = 1 when the tile at that world position is solid (codes 1..10).
+; Changes : AX only
+; -----------------------------------------------------------------------------
+IsSolid:
+        push    bp
+        mov     bp,sp
+        push    word [bp+6]
+        push    word [bp+4]
+        call    GetTile
+        cmp     ax,T_GROUND
+        jb      .no
+        cmp     ax,T_STAIR
+        ja      .no
+        mov     ax,1
+        pop     bp
+        ret     4
+.no:    xor     ax,ax
+        pop     bp
+        ret     4
+
+; -----------------------------------------------------------------------------
+; SetTile(col, row, code)
+; Purpose : writes a tile code into the WORKING map only.
+; Changes : none
+; -----------------------------------------------------------------------------
+SetTile:
+        push    bp
+        mov     bp,sp
+        push    ax
+        push    bx
+        mov     bx,[bp+6]               ; row
+        cmp     bx,MAP_ROWS             ; FIX: never write outside the map
+        jae     .out
+        cmp     word [bp+8],MAP_COLS
+        jae     .out
+        imul    bx,bx,MAP_COLS
+        add     bx,[bp+8]               ; + column
+        mov     al,[bp+4]
+        mov     [WorkMap+bx],al
+.out:   pop     bx
+        pop     ax
+        pop     bp
+        ret     6
+
+; -----------------------------------------------------------------------------
+; DrawMap
+; Purpose : draws the visible part of the working map: 20 columns plus one
+;           partial column.  First column = camera_x / 16 (shift), first
+;           column x = -(camera_x mod 16) (mask).
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawMap:
+        pusha
+        mov     ax,[CamX]
+        mov     dx,ax
+        shr     ax,4                    ; first world column
+        and     dx,15                   ; pixel offset
+        mov     [TmpCol0],ax
+        mov     [TmpOffs],dx
+        mov     si,1                    ; row (row 0 is the HUD)
+.row:   xor     di,di                   ; screen column 0..20
+.col:   mov     ax,[TmpCol0]
+        add     ax,di                   ; world column
+        cmp     ax,MAP_COLS
+        jae     .next
+        mov     bx,si
+        imul    bx,bx,MAP_COLS
+        add     bx,ax
+        xor     cx,cx
+        mov     cl,[WorkMap+bx]         ; tile code
+        test    cl,cl
+        jz      .next
+        mov     bx,cx
+        shl     bx,1
+        mov     bx,[TileAddr+bx]        ; sprite address for this code
+        mov     ax,di
+        shl     ax,4
+        sub     ax,[TmpOffs]            ; screen x
+        mov     dx,si
+        shl     dx,4                    ; screen y
+        cmp     cx,T_COIN
+        je      .coin
+        cmp     cx,T_POLE
+        je      .pole
+        push    ax
+        push    dx
+        push    bx
+        call    DrawTileOpaque
+        jmp     .next
+.coin:  push    ax
+        push    dx
+        push    word SprCoin
+        push    word 16
+        push    word 0
+        call    DrawSprite
+        jmp     .next
+.pole:  cmp     si,2                    ; top of the pole gets the flag
+        jne     .body
+        mov     bx,TilePoleTop
+.body:  push    ax
+        push    dx
+        push    bx
+        push    word 16
+        push    word 0
+        call    DrawSprite
+.next:  inc     di
+        cmp     di,21
+        jb      .col
+        inc     si
+        cmp     si,MAP_ROWS
+        jb      .row
+        popa
+        ret
+
+; -----------------------------------------------------------------------------
+; DrawCloud(x, y)
+; Purpose : a cloud made of two white rectangles (bonus background art).
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawCloud:
+        push    bp
+        mov     bp,sp
+        push    ax
+        mov     ax,[bp+6]
+        add     ax,8
+        push    ax                      ; x + 8
+        push    word [bp+4]             ; y
+        push    word 24
+        push    word 8
+        push    word COL_WHITE
+        call    FillRect
+        push    word [bp+6]             ; x
+        mov     ax,[bp+4]
+        add     ax,8
+        push    ax                      ; y + 8
+        push    word 40
+        push    word 8
+        push    word COL_WHITE
+        call    FillRect
+        pop     ax
+        pop     bp
+        ret     4
+
+; -----------------------------------------------------------------------------
+; DrawBush(x)
+; Purpose : a green bush standing on the ground (x is a screen position).
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawBush:
+        push    bp
+        mov     bp,sp
+        push    ax
+        mov     ax,[bp+4]
+        add     ax,16
+        push    ax
+        push    word 142
+        push    word 16
+        push    word 6
+        push    word COL_GREEN
+        call    FillRect
+        mov     ax,[bp+4]
+        add     ax,8
+        push    ax
+        push    word 148
+        push    word 32
+        push    word 6
+        push    word COL_GREEN
+        call    FillRect
+        push    word [bp+4]
+        push    word 154
+        push    word 48
+        push    word 6
+        push    word COL_GREEN
+        call    FillRect
+        mov     ax,[bp+4]
+        add     ax,20
+        push    ax
+        push    word 146
+        push    word 6
+        push    word 3
+        push    word COL_BRICK          ; spring: pink blossom
+        call    FillRect
+        pop     ax
+        pop     bp
+        ret     2
+
+; -----------------------------------------------------------------------------
+; DrawBackground
+; Purpose : bonus parallax: clouds scroll at half the camera speed, bushes and
+;           the castle scroll together with the world.
+; Changes : none
+; -----------------------------------------------------------------------------
+DrawBackground:
+        pusha
+        cmp     byte [CurLevel],0
+        je      .day
+        call    DrawNightScenery        ; level 2: moon, stars, hills and pines
+        jmp     .castle
+.day:   call    DrawSun                 ; theme: a sun fixed in the sky
+        xor     si,si                   ; cloud index * 2
+.cloud: mov     ax,[CloudX+si]
+        mov     dx,[CamX]
+        shr     dx,1                    ; half speed
+        sub     ax,dx
+        cmp     ax,-48
+        jl      .nc
+        cmp     ax,SCREEN_W
+        jge     .nc
+        push    ax
+        push    word [CloudY+si]
+        call    DrawCloud
+.nc:    add     si,2
+        cmp     si,12
+        jb      .cloud
+        xor     si,si                   ; bushes (world coordinates)
+.bush:  mov     ax,[BushX+si]
+        sub     ax,[CamX]
+        cmp     ax,-48
+        jl      .nb
+        cmp     ax,SCREEN_W
+        jge     .nb
+        push    ax
+        call    DrawBush
+.nb:    add     si,2
+        cmp     si,8
+        jb      .bush
+        ; castle behind the flag pole (world x 928..959)
+.castle: mov    ax,928
+        sub     ax,[CamX]
+        cmp     ax,SCREEN_W
+        jge     near .done
+        push    ax
+        push    word 112
+        push    word 32
+        push    word 48
+        push    word COL_BRICK
+        call    FillRect
+        mov     bx,ax
+        push    bx                      ; battlements
+        push    word 104
+        push    word 8
+        push    word 8
+        push    word COL_BRICK
+        call    FillRect
+        add     bx,12
+        push    bx
+        push    word 104
+        push    word 8
+        push    word 8
+        push    word COL_BRICK
+        call    FillRect
+        add     bx,12
+        push    bx
+        push    word 104
+        push    word 8
+        push    word 8
+        push    word COL_BRICK
+        call    FillRect
+        add     ax,10                   ; door
+        push    ax
+        push    word 136
+        push    word 12
+        push    word 24
+        push    word COL_BLACK
+        call    FillRect
+        cmp     byte [CurLevel],0
+        je      .done
+        sub     ax,8                    ; night: two lit castle windows
+        push    ax
+        push    word 120
+        push    word 4
+        push    word 6
+        push    word COL_YELLOW
+        call    FillRect
+        add     ax,24
+        push    ax
+        push    word 120
+        push    word 4
+        push    word 6
+        push    word COL_YELLOW
+        call    FillRect
+.done:  popa
+        ret
+
