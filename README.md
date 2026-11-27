@@ -10,8 +10,8 @@
 | Member Name | Roll Number | Assigned Modules | Subsystems Owned |
 | :--- | :--- | :--- | :--- |
 | **Ali Raza** | **24F-3020** | **Modules 1, 2, 3, 4, 5** | Foundation, VGA Mode 13h primitives, 60x12 tile map, sprite engine, double buffering |
-| **Umama** | **25F-3008** | **Modules 6, 7, 8, 9, 10** | Scrolling camera, custom keyboard ISR (port 60h), timer ISR, 8.8 physics, collision |
-| **Aiza** | **25F-3061** | **Modules 11, 12, 13, 14, 15** | Enemies AI (Goomba/Koopa/Shell), interactive blocks, HUD/Score, state machine, lifecycle |
+| **Umama** | **25F-3061** | **Modules 6, 7, 8, 9, 10** | Scrolling camera, custom keyboard ISR (port 60h), timer ISR, 8.8 physics, collision |
+| **Aiza** | **25F-3008** | **Modules 11, 12, 13, 14, 15** | Enemies AI (Goomba/Koopa/Shell), interactive blocks, HUD/Score, state machine, lifecycle |
 
 ---
 
